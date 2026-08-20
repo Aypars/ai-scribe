@@ -55,6 +55,8 @@ CREATE TABLE transcripts (
     text       TEXT NOT NULL,
     timestamp  INTEGER NOT NULL CHECK (timestamp >= 0),
     speaker    VARCHAR(64),
+    speaker_origin VARCHAR(64),
+    flags      TEXT,
     PRIMARY KEY (meeting_id, seq)
 );
 

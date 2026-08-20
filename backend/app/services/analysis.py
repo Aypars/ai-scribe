@@ -6,41 +6,57 @@ import json
 import logging
 import os
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import TypeVar
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.config import settings
 from app.models.transcript import Transcript
+from app.services.turkish import fix_sentence_i
 
 logger = logging.getLogger(__name__)
 
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
-ANALYSIS_PROMPT = """Sen AI-SCRIBE için kıdemli bir toplantı ve görüşme analistisin. Görevin, verilen transkripti bir yönetici asistanı gibi okuyup kurumsal kalitede, net ve kullanılabilir bir analiz üretmektir.
+ANALYSIS_PROMPT = """Sen AI-SCRIBE için kıdemli bir toplantı raportörüsün. Transkripti baştan sona oku; atlama, sıkıştırarak yok etme.
 
-Kayıt resmi bir toplantı, standup, müşteri görüşmesi, ders, dil pratiği, podcast veya gündelik sohbet olabilir. Türü ne olursa olsun boş bırakma. Her kayıttan mutlaka (1) düzgün bir özet, (2) en az birkaç karar / çıkarım ve (3) somut aksiyon maddeleri üret. Kullanıcı bunları görev panosunda görmek zorundadır.
+Kayıt her türlü toplantı olabilir: şirket, ekip, müşteri, okul, dernek, belediye, meclis veya başka bir görüşme. Türe varsayım yapma.
 
-Nasıl düşün:
-Transkripti baştan sona oku. Kimlerin konuştuğunu, asıl konuyu, dönülen noktaları, uzlaşılan fikirleri ve “şunu yapalım / bakayım / göndereyim / karar verdik / tamam” gibi taahhütleri yakala. Açıkça “karar aldık” denmese bile üzerinde anlaşılan tercih, kural, tarih, yaklaşım veya sonuç bir karardır. “Yarın bakarım”, “mail atayım”, “şunu hazırlayalım”, “bunu kontrol edelim” gibi cümleler aksiyondur. Sohbet veya dil pratiği olsa bile: pratik hedefleri, tekrar edilecek konular, düzeltilecek hatalar, sonraki adımlar ve kimin ne yapacağı aksiyon olarak yazılsın.
+Boş veya toplantı değilse (müzik, gürültü, şarkı sözü, sessizlik, anlamsız ses):
+- summary: 1-2 cümle, kaydın toplantı olmadığını söyle.
+- decisions: [].
+- actions: [].
+Uydurma karar, beyan, kapanış, gündem YASAK.
 
-Çıktı alanları (JSON şemasına birebir uy):
-- summary: Yönetici özeti. Kısa kayıtta 2 paragraf yeter; uzun toplantıda ihtiyaç kadar yaz, üst sınır yok. Birinci paragraf kaydın türünü, amacını ve katılımcıları versin. Sonrakiler önemli tartışmaları, varılan noktayı ve iş etkisi olan sonuçları anlatsın. Madde işareti kullanma. Uydurma isim, rakam veya olay ekleme; transkriptte geçenleri profesyonel dille toparla.
-- decisions: Kayıtta ne kadar karar / uzlaşı / çıkarım varsa hepsini yaz. Sayı tavanı yok; 1 saatlik toplantıda onlarca madde normaldir. Her madde tek, net, sonuç cümlesi olsun (“X konusunda Y yaklaşımı benimsenecek”). Belirsiz “belki konuşulur” cümlelerini karar yapma; örtük uzlaşıyı ve pratik çıkarımları karar olarak yaz. Boş dizi döndürme. Her karar için source_seq_start ve source_seq_end ver: yalnızca BU kararı söyleyen, netleştiren veya onaylayan satırların # numaraları. Aralık mümkün olduğunca dar olsun. İki replikte bittiyse tam o iki satır; tek cümleyse tek satır. Önceki/sonraki gündemi, selamlaşmayı, geçiş cümlesini veya alakasız sohbeti koyma. Dakikaya göre şişirme.
-- actions: Kayıtta ne kadar yapılacak iş varsa hepsini yaz. Sayı tavanı yok; tekrar etme, atlama. Her aksiyon yapılabilir bir iş olsun.
-  - description: emir kipi / net iş (“Sunumu güncelle”, “Kelime listesini tekrarla”, “Müşteriye tarih teyit et”).
-  - assignee: transkriptteki konuşmacı adı; yoksa null.
-  - due_date: yalnızca açık bir tarih geçiyorsa YYYY-MM-DD; yoksa null.
-  - notes: 1–2 cümle bağlam: neden bu iş çıktı, transkriptte hangi noktaya bağlı.
+Toplantıysa JSON alanları:
+
+- summary: Kurumsal toplantı raporu. Tek paragraf YASAK. Kısa kayıtta en az 3–4 paragraf; uzun toplantıda gündem maddesi başına ayrı paragraf, üst sınır yok.
+  Yapı (her blok kendi paragrafı, başlık ayrı satır, markdown/madde işareti yok):
+  1) Çerçeve: tür, tarih, kim yönetti, kimler katıldı, amaç.
+  2) Gündem akışı: her madde sırayla; talep, kim ne dedi, gerekçe, varılan nokta.
+  3) İdari hususlar: atama, yetki, protokol, alım, bağış, sevk. Yoksa bu bloğu atla.
+  4) Sonuç.
+  Uydurma isim, rakam, olay yok.
+
+- decisions: Alınan HER karar. Sayı tavanı yok. Kabul, ret, sevk, atama, yetki, protokol, alım — ayrı madde.
+  Aksiyon kararı silmez. Konuşulup bağlanan bir şey aksiyonda varsa kararda da olsun.
+  “toplantı bitti / beyanla sona erdi” karar değildir. Tek cümle. source_seq_start / source_seq_end dar.
+
+- actions: Yalnızca BU transkriptte yapılacak denmiş işler. Başka toplantıdaki aksiyonu kopyalama.
+  Sayı tavanı yok. Birleştirip kısa liste yapma.
+  description: net iş.
+  assignee: yalnızca transkriptteki konuşmacı etiketi (Konuşmacı A/B/C…). Kişi defteri, başka toplantı, tahmin isim YASAK. Emin değilsen null.
+  due_date: yalnız açık tarih. notes: 1 cümle veya "".
 
 Üslup:
-- Çıktıyı transkriptle aynı dilde yaz (Türkçe kayıt → Türkçe, İngilizce → İngilizce).
-- Kurumsal, sakin, kesin ol. Argo, emoji, “aslında / belki / galiba” dolgusu yok.
-- Aynı işi iki kez yazma. Aksiyonlar kararı tekrar etmesin; kararı uygulamaya çevirsin.
-- Konuşmacı adlarını transkriptteki haliyle kullan (Konuşmacı A gibi etiketler dahil).
-- Tarih uydurma. Sayı, isim ve vaatleri transkriptten al.
+- Transkriptle aynı dil.
+- Konuşmacı etiketlerini transkriptteki haliyle bırak (Konuşmacı A/B/C…).
+- Bu kayıt tek başına. Başlık benzer diye başka toplantıdaki kişi veya işi yazma.
 """
 
 
@@ -75,17 +91,26 @@ class DecisionDraft(BaseModel):
 
 class ActionDraft(BaseModel):
     description: str = Field(description="Yapılacak somut iş; tek net cümle")
-    assignee: str | None = Field(default=None, description="Transkriptteki konuşmacı adı; yoksa null")
+    assignee: str | None = Field(
+        default=None,
+        description="Yalnızca bu transkriptteki Konuşmacı A/B/C etiketi; yoksa null. Başka toplantıdaki kişi yazma.",
+    )
     due_date: str | None = Field(default=None, description="YYYY-MM-DD; açık tarih yoksa null")
     notes: str = Field(default="", description="1-2 cümle bağlam")
 
 
 class AnalysisDraft(BaseModel):
-    summary: str = Field(description="Profesyonel yönetici özeti; uzunluk kayda göre, tavan yok")
-    decisions: list[DecisionDraft] = Field(
-        description="Kayıttaki tüm karar ve çıkarımlar; her birinde dar source_seq_start / source_seq_end olsun"
+    actions: list[ActionDraft] = Field(
+        default_factory=list,
+        description="Yalnızca bu transkriptteki işler. Başka toplantıdan kopyalama. Tavan yok.",
     )
-    actions: list[ActionDraft] = Field(description="Kayıttaki tüm aksiyonlar; sayı tavanı yok, boş olmasın")
+    decisions: list[DecisionDraft] = Field(
+        default_factory=list,
+        description="Alınan, reddedilen veya sevk edilen her karar. Atlanmaz. Dar source_seq_start / source_seq_end.",
+    )
+    summary: str = Field(
+        description="Kapsamlı kurumsal toplantı raporu. Tek paragraf yasak. Gündem maddelerini sırayla anlatan birden fazla paragraf."
+    )
 
     @field_validator("decisions", mode="before")
     @classmethod
@@ -121,6 +146,7 @@ class AnalysisResult:
     summary: str
     decisions: list[DecisionResult]
     actions: list[ActionResult]
+    speakers: dict[str, str]
 
 
 _STOP = {
@@ -270,7 +296,150 @@ def _friendly_gemini_error(exc: BaseException) -> str:
         )
     if "permission" in lowered or "unauthenticated" in lowered:
         return "Gemini yetkisi reddedildi. Anahtarın Gemini API için açık olduğundan emin ol."
+    if _is_quota_gemini(text):
+        return (
+            "Gemini ücretsiz kotası doldu (bu modelde günde 20 istek). "
+            "Yarın sıfırlanır. Şimdi devam için Google AI Studio’da faturalama aç "
+            "veya backend/.env içinde GEMINI_MODEL’i kotası kalan bir modele çevir."
+        )
+    if _is_transient_gemini(text):
+        return "Gemini şu an yoğun. Biraz sonra otomatik tekrar denenecek."
     return text or "Gemini isteği başarısız"
+
+
+def _is_quota_gemini(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "resource_exhausted",
+            "quota",
+            "rate limit",
+            "rate_limit",
+            "429",
+            "limit: 0",
+            "exceeded",
+        )
+    )
+
+
+def _is_transient_gemini(text: str) -> bool:
+    if _is_quota_gemini(text):
+        return False
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in (
+            "503",
+            "unavailable",
+            "high demand",
+            "overloaded",
+            "temporarily",
+            "try again",
+            "yoğun",
+        )
+    )
+
+
+TModel = TypeVar("TModel", bound=BaseModel)
+
+
+def _parse_model(model: type[TModel], raw: str) -> TModel:
+    try:
+        return model.model_validate_json(raw)
+    except Exception:
+        return model.model_validate(json.loads(raw))
+
+
+def _generate_json(
+    client: object,
+    prompt: str,
+    schema: type[TModel],
+    *,
+    max_output_tokens: int = 8192,
+    on_busy: Callable[[int], None] | None = None,
+    waits: tuple[int, ...] = (0, 8, 20),
+) -> TModel:
+    last: BaseException | None = None
+    for attempt, wait in enumerate(waits, start=1):
+        if wait:
+            logger.warning("Gemini busy, retry %s after %ss", attempt, wait)
+            if on_busy:
+                on_busy(wait)
+            time.sleep(wait)
+        try:
+            response = client.models.generate_content(
+                model=_model_name(),
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": schema.model_json_schema(),
+                    "max_output_tokens": max_output_tokens,
+                },
+            )
+        except Exception as exc:
+            last = exc
+            if _is_quota_gemini(str(exc)):
+                raise AnalysisError(_friendly_gemini_error(exc)) from exc
+            if _is_transient_gemini(str(exc)) and attempt < len(waits):
+                continue
+            raise AnalysisError(_friendly_gemini_error(exc)) from exc
+        raw = (response.text or "").strip()
+        if not raw:
+            last = AnalysisError("Gemini boş yanıt döndü")
+            if attempt < len(waits):
+                continue
+            raise last
+        try:
+            return _parse_model(schema, raw)
+        except Exception as exc:
+            last = exc
+            if attempt < len(waits):
+                continue
+            raise AnalysisError("Gemini yanıtı çözümlenemedi") from exc
+    raise AnalysisError(_friendly_gemini_error(last or Exception("Gemini isteği başarısız")))
+
+
+def _speaker_labels(lines: list[Transcript]) -> dict[str, str]:
+    allowed: dict[str, str] = {}
+    for row in lines:
+        name = (row.speaker or "").strip()
+        if name:
+            allowed[name.casefold()] = name
+    return allowed
+
+
+def _assignee_in_meeting(raw: str | None, allowed: dict[str, str]) -> str | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    hit = allowed.get(text.casefold())
+    if hit:
+        return hit
+    short = text.rsplit(maxsplit=1)[-1]
+    return allowed.get(f"konuşmacı {short}".casefold())
+
+
+def _append_actions(
+    items: list[ActionDraft],
+    actions: list[ActionResult],
+    seen: set[str],
+    allowed: dict[str, str],
+) -> None:
+    for item in items:
+        description_text = fix_sentence_i((item.description or "").strip())
+        key = " ".join(description_text.lower().split())
+        if not description_text or key in seen:
+            continue
+        seen.add(key)
+        actions.append(
+            ActionResult(
+                description=description_text,
+                assignee=_assignee_in_meeting(item.assignee, allowed),
+                due_date=_parse_due(item.due_date),
+                notes=fix_sentence_i((item.notes or "").strip()),
+            )
+        )
 
 
 def analyze_transcript(
@@ -280,6 +449,7 @@ def analyze_transcript(
     attendees: str | None,
     meeting_date: str | None,
     description: str | None = None,
+    on_busy: Callable[[int], None] | None = None,
 ) -> AnalysisResult:
     api_key = _api_key()
     if not api_key:
@@ -290,48 +460,38 @@ def analyze_transcript(
     from google import genai
 
     body = _transcript_text(lines)
+    speakers = ", ".join(_speaker_labels(lines).values()) or "yok"
     extra = f"Açıklama: {description}\n" if description else ""
-    prompt = (
-        f"{ANALYSIS_PROMPT}\n"
-        f"Toplantı: {title}\n"
+    header = (
+        f"Bu kayıt tek başına analiz edilecek. Başka toplantı, kişi listesi veya önceki analiz yok.\n"
+        f"Toplantı başlığı (yalnızca bu kayıt): {title}\n"
         f"Tarih: {meeting_date or 'belirtilmedi'}\n"
-        f"Katılımcılar: {attendees or 'belirtilmedi'}\n"
+        f"Bu transkriptteki konuşmacı etiketleri: {speakers}\n"
         f"{extra}\n"
         f"Transkript:\n{body}\n"
     )
 
     client = genai.Client(api_key=api_key)
     try:
-        response = client.models.generate_content(
-            model=_model_name(),
-            contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_json_schema": AnalysisDraft.model_json_schema(),
-            },
+        draft = _generate_json(
+            client,
+            f"{ANALYSIS_PROMPT}\n{header}",
+            AnalysisDraft,
+            max_output_tokens=16384,
+            on_busy=on_busy,
         )
+    except AnalysisError:
+        raise
     except Exception as exc:
         raise AnalysisError(_friendly_gemini_error(exc)) from exc
 
-    raw = (response.text or "").strip()
-    if not raw:
-        raise AnalysisError("Gemini boş yanıt döndü")
-
-    try:
-        draft = AnalysisDraft.model_validate_json(raw)
-    except Exception:
-        try:
-            draft = AnalysisDraft.model_validate(json.loads(raw))
-        except Exception as exc:
-            raise AnalysisError("Gemini yanıtı çözümlenemedi") from exc
-
-    summary = draft.summary.strip()
+    summary = fix_sentence_i(draft.summary.strip())
     if not summary:
         raise AnalysisError("Özet boş geldi")
 
     decisions: list[DecisionResult] = []
     for item in draft.decisions:
-        text = item.text.strip()
+        text = fix_sentence_i(item.text.strip())
         if not text:
             continue
         start_seq, end_seq = match_decision_span(
@@ -339,17 +499,9 @@ def analyze_transcript(
         )
         decisions.append(DecisionResult(text=text, source_seq=start_seq, source_end_seq=end_seq))
 
-    return AnalysisResult(
-        summary=summary,
-        decisions=decisions,
-        actions=[
-            ActionResult(
-                description=item.description.strip(),
-                assignee=(item.assignee or "").strip() or None,
-                due_date=_parse_due(item.due_date),
-                notes=(item.notes or "").strip(),
-            )
-            for item in draft.actions
-            if item.description.strip()
-        ],
-    )
+    seen: set[str] = set()
+    actions: list[ActionResult] = []
+    _append_actions(draft.actions, actions, seen, _speaker_labels(lines))
+    logger.warning("Gemini analysis summary_len=%s decisions=%s actions=%s", len(summary), len(decisions), len(actions))
+
+    return AnalysisResult(summary=summary, decisions=decisions, actions=actions, speakers={})

@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     secret_key: str = "change-me"
-    max_upload_bytes: int = 100 * 1024 * 1024  # 100 MB
+    max_upload_bytes: int = 500 * 1024 * 1024  # 500 MB
     whisper_model: str = "turbo"
-    whisper_language: str = ""
+    whisper_language: str = "tr"
     whisper_bin: str = ""
     whisperx_bin: str = ""
     whisperx_model: str = "large-v2"

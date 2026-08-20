@@ -1,4 +1,6 @@
 from datetime import date, datetime
+import json
+import logging
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
@@ -11,6 +13,40 @@ from app.models.task import Task
 from app.models.transcript import Transcript
 from app.services.analysis import AnalysisResult
 from app.services.transcription import TranscriptSegment
+
+logger = logging.getLogger(__name__)
+
+
+def parse_flags(raw: str | None) -> list[dict[str, str]]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    flags: list[dict[str, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        original = str(item.get("original") or "").strip()
+        suggestion = str(item.get("suggestion") or "").strip()
+        if not original or not suggestion:
+            continue
+        flags.append(
+            {
+                "original": original,
+                "suggestion": suggestion,
+                "reason": str(item.get("reason") or "").strip(),
+            }
+        )
+    return flags
+
+
+def dump_flags(flags: list[dict[str, str]] | None) -> str | None:
+    cleaned = parse_flags(json.dumps(flags, ensure_ascii=False)) if flags else []
+    return json.dumps(cleaned, ensure_ascii=False) if cleaned else None
 
 
 def speaker_names(rows: list) -> list[str]:
@@ -154,6 +190,7 @@ def replace_transcript(
                 text=segment.text,
                 timestamp=segment.timestamp,
                 speaker=segment.speaker,
+                speaker_origin=segment.speaker,
             )
         )
     _apply_attendees(meeting, segments)
@@ -179,6 +216,7 @@ def rename_speaker_line(db: Session, meeting: Meeting, seq: int, speaker: str) -
     if row is None:
         return None
     row.speaker = speaker
+    row.speaker_origin = None
     _apply_attendees(meeting, meeting.transcripts)
     from app.repositories import people as people_repo
 
@@ -192,6 +230,7 @@ def rename_speaker_all(db: Session, meeting: Meeting, from_speaker: str, speaker
     for row in meeting.transcripts:
         if row.speaker == from_speaker:
             row.speaker = speaker
+            row.speaker_origin = None
     _apply_attendees(meeting, meeting.transcripts)
     from app.repositories import people as people_repo
 
@@ -201,13 +240,122 @@ def rename_speaker_all(db: Session, meeting: Meeting, from_speaker: str, speaker
     return meeting
 
 
-def update_transcript_text(db: Session, meeting: Meeting, seq: int, text: str) -> Meeting | None:
+def apply_speaker_map(db: Session, meeting: Meeting, mapping: dict[str, str] | None = None) -> Meeting:
+    mapping = {key: _strip_guess_mark(value) for key, value in (mapping or {}).items()}
+    from app.services.speakers import is_generic_label
+
+    for row in meeting.transcripts:
+        speaker = (row.speaker or "").strip()
+        if is_generic_label(speaker) and speaker in mapping:
+            if not row.speaker_origin:
+                row.speaker_origin = speaker
+            row.speaker = mapping[speaker]
+        elif speaker.endswith("?"):
+            row.speaker = _strip_guess_mark(speaker)
+    _apply_attendees(meeting, meeting.transcripts)
+    from app.repositories import people as people_repo
+
+    people_repo.sync_speakers_for_meeting(db, meeting, meeting.transcripts, commit=False)
+    db.commit()
+    db.refresh(meeting)
+    return meeting
+
+
+def fix_transcript_sentence_i(db: Session, meeting: Meeting) -> Meeting:
+    from app.services.turkish import fix_sentence_i
+
+    changed = False
+    for row in meeting.transcripts:
+        text = row.text or ""
+        fixed = fix_sentence_i(text)
+        if fixed != text:
+            row.text = fixed
+            changed = True
+    if not changed:
+        return meeting
+    db.commit()
+    db.refresh(meeting)
+    return meeting
+
+
+def _strip_guess_mark(name: str) -> str:
+    return name.strip().removesuffix("?").strip()
+
+
+def resolve_speaker_guess(db: Session, meeting: Meeting, pending_name: str, *, confirm: bool) -> Meeting:
+    target = pending_name.strip()
+    if not target:
+        return meeting
+    for row in meeting.transcripts:
+        speaker = (row.speaker or "").strip()
+        if speaker != target:
+            continue
+        origin = (row.speaker_origin or "").strip()
+        if confirm:
+            row.speaker = _strip_guess_mark(speaker)
+        else:
+            row.speaker = origin or speaker
+        row.speaker_origin = None
+    _apply_attendees(meeting, meeting.transcripts)
+    from app.repositories import people as people_repo
+
+    people_repo.sync_speakers_for_meeting(db, meeting, meeting.transcripts, commit=False)
+    db.commit()
+    db.refresh(meeting)
+    return meeting
+
+
+def update_transcript_text(
+    db: Session,
+    meeting: Meeting,
+    seq: int,
+    text: str,
+    flags: list[dict[str, str]] | None = None,
+) -> Meeting | None:
     row = db.get(Transcript, (meeting.meeting_id, seq))
     if row is None:
         return None
     row.text = text
+    if flags is not None:
+        row.flags = dump_flags(flags)
+    else:
+        kept = [item for item in parse_flags(row.flags) if item["original"] in text]
+        row.flags = dump_flags(kept)
     db.commit()
     return get_for_user(db, meeting.user_id, meeting.meeting_id) or meeting
+
+
+def apply_transcript_review(db: Session, meeting: Meeting, items: list) -> Meeting:
+    from app.services.transcript_review import is_case_only, replace_ci
+
+    by_seq = {row.seq: row for row in meeting.transcripts}
+    for item in items:
+        row = by_seq.get(item.seq)
+        if row is None:
+            continue
+        original = item.original.strip()
+        suggestion = item.suggestion.strip()
+        if item.kind == "proper_name" or is_case_only(original, suggestion):
+            updated = replace_ci(row.text, original, suggestion)
+            if updated is not None:
+                from app.services.turkish import fix_sentence_i
+
+                row.text = fix_sentence_i(updated)
+            continue
+        flags = parse_flags(row.flags)
+        if any(flag["original"] == original for flag in flags):
+            continue
+        flags.append(
+            {
+                "original": original,
+                "suggestion": suggestion,
+                "reason": (item.reason or "").strip(),
+            }
+        )
+        row.flags = dump_flags(flags)
+    db.commit()
+    db.refresh(meeting)
+    return meeting
 
 
 def replace_analysis(db: Session, meeting: Meeting, result: AnalysisResult) -> Meeting:
@@ -230,20 +378,22 @@ def replace_analysis(db: Session, meeting: Meeting, result: AnalysisResult) -> M
             )
         )
 
-    has_tasks = db.scalar(select(Task.meeting_id).where(Task.meeting_id == meeting.meeting_id).limit(1))
     existing = list(
         db.scalars(select(Action).where(Action.meeting_id == meeting.meeting_id).order_by(Action.seq)).all()
     )
-    dismissed_keys = {
-        " ".join((row.description or "").lower().split()) for row in existing if row.dismissed
+    task_seqs = set(
+        db.scalars(select(Task.action_seq).where(Task.meeting_id == meeting.meeting_id)).all()
+    )
+    keep_seqs = {row.seq for row in existing if row.dismissed or row.seq in task_seqs}
+    for row in existing:
+        if row.seq not in keep_seqs:
+            db.delete(row)
+    db.flush()
+    existing_keys = {
+        " ".join((row.description or "").lower().split())
+        for row in existing
+        if row.seq in keep_seqs
     }
-    existing_keys = {" ".join((row.description or "").lower().split()) for row in existing}
-
-    if has_tasks is None:
-        db.execute(
-            delete(Action).where(Action.meeting_id == meeting.meeting_id, Action.dismissed.is_(False))
-        )
-        existing_keys = dismissed_keys
 
     current = db.scalar(
         select(Action.seq).where(Action.meeting_id == meeting.meeting_id).order_by(Action.seq.desc()).limit(1)
@@ -271,6 +421,13 @@ def replace_analysis(db: Session, meeting: Meeting, result: AnalysisResult) -> M
     meeting.status = "analyzed"
     db.commit()
     db.refresh(meeting)
+    logger.warning(
+        "Replaced analysis for meeting %s: decisions=%s actions_in=%s actions_saved=%s",
+        meeting.meeting_id,
+        len(result.decisions),
+        len(result.actions),
+        added,
+    )
     return meeting
 
 

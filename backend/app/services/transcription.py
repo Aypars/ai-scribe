@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.core.config import settings
+from app.services.turkish import fix_sentence_i
 
 logger = logging.getLogger(__name__)
 _SENTENCE_END = re.compile(r"[.!?…][\"')\]]*(?:\s+|$)")
@@ -55,14 +56,14 @@ def _split_sentence_segments(raw_segments: list[dict]) -> list[TranscriptSegment
             idx = min(last + lead, max(len(ts_at) - 1, 0))
             timestamp = max(last_ts, int(ts_at[idx]) if ts_at else 0)
             last_ts = timestamp
-            sentences.append(TranscriptSegment(timestamp=timestamp, text=text))
+            sentences.append(TranscriptSegment(timestamp=timestamp, text=fix_sentence_i(text)))
         last = end
     tail = joined[last:].strip()
     if tail:
         lead = len(joined[last:]) - len(joined[last:].lstrip())
         idx = min(last + lead, max(len(ts_at) - 1, 0))
         timestamp = max(last_ts, int(ts_at[idx]) if ts_at else 0)
-        sentences.append(TranscriptSegment(timestamp=timestamp, text=tail))
+        sentences.append(TranscriptSegment(timestamp=timestamp, text=fix_sentence_i(tail)))
     return sentences
 
 _WINGET_FFMPEG = Path.home() / (
@@ -102,9 +103,16 @@ class TranscriptionError(RuntimeError):
     pass
 
 
+class TranscriptionCancelled(TranscriptionError):
+    pass
+
+
 _jobs: dict[int, TranscriptionJob] = {}
 _jobs_lock = threading.Lock()
 _transcribe_lock = threading.Lock()
+_proc_lock = threading.Lock()
+_procs: dict[int, subprocess.Popen[str]] = {}
+_cancel_ids: set[int] = set()
 
 
 def get_job(meeting_id: int) -> TranscriptionJob | None:
@@ -163,6 +171,69 @@ def fail_job(meeting_id: int, error: str) -> None:
         job.state = "failed"
         job.message = "Yazıya çevirme başarısız"
         job.error = error[:400]
+
+
+def _is_cancelled(meeting_id: int | None) -> bool:
+    if meeting_id is None:
+        return False
+    with _proc_lock:
+        return meeting_id in _cancel_ids
+
+
+def _kill_tree(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    proc.kill()
+
+
+def _kill_matching_windows(needle: str) -> None:
+    safe = needle.replace("'", "").replace("`", "")
+    if os.name != "nt" or not safe:
+        return
+    script = (
+        "Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{safe}') }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def cancel_transcription(meeting_id: int, audio_path: str | None = None) -> None:
+    with _proc_lock:
+        _cancel_ids.add(meeting_id)
+        proc = _procs.get(meeting_id)
+    if proc is not None:
+        logger.warning("Killing Whisper process for meeting %s (pid %s)", meeting_id, proc.pid)
+        _kill_tree(proc)
+    if audio_path:
+        name = Path(audio_path).name
+        if name:
+            _kill_matching_windows(name)
+    with _jobs_lock:
+        job = _jobs.get(meeting_id)
+        if job is not None and job.state == "running":
+            job.state = "failed"
+            job.message = "Yazıya çevirme iptal edildi"
+            job.error = None
+
+
+def clear_transcription(meeting_id: int) -> None:
+    with _proc_lock:
+        _cancel_ids.discard(meeting_id)
+        _procs.pop(meeting_id, None)
 
 
 def _first_existing(paths: list[Path]) -> Path | None:
@@ -260,7 +331,7 @@ def _segments_from_whisperx(raw_segments: list[dict]) -> list[TranscriptSegment]
             words = item.get("words") or []
             if words:
                 speaker = _speaker_label(words[0].get("speaker"))
-        segments.append(TranscriptSegment(timestamp=start, text=text, speaker=speaker))
+        segments.append(TranscriptSegment(timestamp=start, text=fix_sentence_i(text), speaker=speaker))
     return segments
 
 
@@ -268,17 +339,18 @@ def _tool_env() -> dict[str, str]:
     env = os.environ.copy()
     extras: list[str] = []
     ffmpeg = _find_ffmpeg()
-    whisperx = _find_whisperx()
-    whisper = _find_whisper()
-    python = _find_python()
     if ffmpeg:
         extras.append(str(ffmpeg.parent))
+    whisperx = _find_whisperx()
     if whisperx:
         extras.append(str(whisperx.parent))
-    if whisper:
-        extras.append(str(whisper.parent))
-    if python:
-        extras.append(str(python.parent))
+    else:
+        whisper = _find_whisper()
+        python = _find_python()
+        if whisper:
+            extras.append(str(whisper.parent))
+        if python:
+            extras.append(str(python.parent))
     if extras:
         env["PATH"] = os.pathsep.join(extras) + os.pathsep + env.get("PATH", "")
     env["PYTHONUNBUFFERED"] = "1"
@@ -287,6 +359,22 @@ def _tool_env() -> dict[str, str]:
         env["HF_TOKEN"] = settings.hf_token
         env["HUGGING_FACE_HUB_TOKEN"] = settings.hf_token
     return env
+
+
+def _whisper_language() -> str | None:
+    language = settings.whisper_language.strip().lower()
+    if language in {"auto", "detect"}:
+        return None
+    return language or "tr"
+
+
+def _append_language_and_task(cmd: list[str]) -> None:
+    # transcribe = spoken language as-is. Without --language, Whisper often
+    # misdetects Turkish council audio as English and writes English anyway.
+    cmd.extend(["--task", "transcribe"])
+    language = _whisper_language()
+    if language:
+        cmd.extend(["--language", language])
 
 
 def _whisperx_cmd(audio_path: Path, out_dir: Path) -> list[str]:
@@ -307,9 +395,7 @@ def _whisperx_cmd(audio_path: Path, out_dir: Path) -> list[str]:
     ]
     if settings.hf_token.strip():
         cmd.extend(["--diarize", "--hf_token", settings.hf_token.strip()])
-    language = settings.whisper_language.strip()
-    if language:
-        cmd.extend(["--language", language])
+    _append_language_and_task(cmd)
     return cmd
 
 
@@ -326,9 +412,7 @@ def _whisper_cmd(audio_path: Path, out_dir: Path) -> list[str]:
         "--verbose",
         "False",
     ]
-    language = settings.whisper_language.strip()
-    if language:
-        args.extend(["--language", language])
+    _append_language_and_task(args)
     if python is not None and _find_whisperx() is None:
         return [str(python), "-u", "-m", "whisper", *args]
     whisper = _find_whisper()
@@ -385,7 +469,10 @@ def _pump_output(stream: object, on_progress: Callable[[int, str], None] | None)
 def transcribe_audio(
     audio_path: Path,
     on_progress: Callable[[int, str], None] | None = None,
+    meeting_id: int | None = None,
 ) -> TranscriptResult:
+    if _is_cancelled(meeting_id):
+        raise TranscriptionCancelled("Yazıya çevirme iptal edildi")
     if not audio_path.is_file():
         raise TranscriptionError(f"Ses dosyası bulunamadı: {audio_path}")
 
@@ -404,8 +491,11 @@ def transcribe_audio(
         out_dir = Path(tmp)
         cmd = _whisperx_cmd(audio_path, out_dir) if use_whisperx else _whisper_cmd(audio_path, out_dir)
         logger.warning("Transcription starting with %s", Path(cmd[0]).name)
+        returncode = 1
         try:
             with _transcribe_lock:
+                if _is_cancelled(meeting_id):
+                    raise TranscriptionCancelled("Yazıya çevirme iptal edildi")
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -416,6 +506,9 @@ def transcribe_audio(
                     env=_tool_env(),
                     creationflags=_CREATE_NO_WINDOW,
                 )
+                if meeting_id is not None:
+                    with _proc_lock:
+                        _procs[meeting_id] = proc
                 pump = threading.Thread(
                     target=_pump_output,
                     args=(proc.stdout, on_progress),
@@ -425,12 +518,22 @@ def transcribe_audio(
                 try:
                     returncode = proc.wait(timeout=30 * 60)
                 except subprocess.TimeoutExpired as exc:
-                    proc.kill()
+                    _kill_tree(proc)
                     raise TranscriptionError("WhisperX zaman aşımına uğradı") from exc
+                finally:
+                    if meeting_id is not None:
+                        with _proc_lock:
+                            current = _procs.get(meeting_id)
+                            if current is proc:
+                                _procs.pop(meeting_id, None)
                 pump.join(timeout=5)
+        except TranscriptionCancelled:
+            raise
         except OSError as exc:
             raise TranscriptionError(f"WhisperX başlatılamadı: {exc}") from exc
 
+        if _is_cancelled(meeting_id):
+            raise TranscriptionCancelled("Yazıya çevirme iptal edildi")
         if returncode != 0:
             raise TranscriptionError("WhisperX başarısız oldu")
 
@@ -450,7 +553,7 @@ def transcribe_audio(
 
     full_text = str(payload.get("text") or "").strip()
     if not segments and full_text:
-        segments = [TranscriptSegment(timestamp=0, text=full_text)]
+        segments = [TranscriptSegment(timestamp=0, text=fix_sentence_i(full_text))]
 
     last_end = 0.0
     for item in raw_segments:

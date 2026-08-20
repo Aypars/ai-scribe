@@ -5,9 +5,9 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
-import { DueHint, MeetingBadge } from "@/components/StatusBadge";
+import { DueHint, MeetingBadge, DueAlertLine } from "@/components/StatusBadge";
 import { fetchMeetings, fetchTasks, type Meeting, type Task } from "@/lib/api";
-import { byDueDate, dateOnly, dueTone, formatDay, formatDuration } from "@/lib/demo-data";
+import { byDueDate, countDueAlerts, dateOnly, dueTone, formatDay, formatDuration } from "@/lib/demo-data";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -33,6 +33,7 @@ export default function DashboardPage() {
   const recent = meetings.slice(0, 4);
   const upcoming = [...openTasks].sort(byDueDate).slice(0, 4);
   const rate = meetings.length ? Math.round((analyzed / meetings.length) * 1000) / 10 : 0;
+  const alerts = countDueAlerts(openTasks);
 
   return (
     <AppShell title="Dashboard">
@@ -62,17 +63,39 @@ export default function DashboardPage() {
           <p className="mt-3 text-3xl font-semibold tracking-tight text-slate-900 dark:text-teal-50">{loading ? "—" : analyzed}</p>
           <p className="mt-1 text-xs text-slate-400">%{rate} başarı oranı</p>
         </article>
-        <article className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-teal-800/40 dark:bg-[#0f2220]">
+        <article
+          className={`rounded-2xl border p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${
+            alerts.overdue > 0
+              ? "border-rose-300 bg-rose-50 dark:border-rose-800/70 dark:bg-rose-950/40"
+              : alerts.soon > 0
+                ? "border-amber-300 bg-amber-50 dark:border-amber-800/70 dark:bg-amber-950/40"
+                : "border-slate-200/80 bg-white dark:border-teal-800/40 dark:bg-[#0f2220]"
+          }`}
+        >
           <div className="flex items-start justify-between">
             <p className="text-sm text-slate-500 dark:text-slate-400">Açık görev</p>
-            <span className="rounded-lg bg-sky-100 p-1.5 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">
+            <span
+              className={`rounded-lg p-1.5 ${
+                alerts.overdue > 0
+                  ? "bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-200"
+                  : alerts.soon > 0
+                    ? "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200"
+                    : "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300"
+              }`}
+            >
               <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6M7 4h10a2 2 0 0 1 2 2v14l-7-3-7 3V6a2 2 0 0 1 2-2Z" />
               </svg>
             </span>
           </div>
           <p className="mt-3 text-3xl font-semibold tracking-tight text-slate-900 dark:text-teal-50">{loading ? "—" : openTasks.length}</p>
-          <p className="mt-1 text-xs text-slate-400">Teslim tarihi yaklaşan işler</p>
+          {loading ? (
+            <p className="mt-1 text-xs text-slate-400">Teslim tarihi yaklaşan işler</p>
+          ) : alerts.overdue > 0 || alerts.soon > 0 ? (
+            <DueAlertLine overdue={alerts.overdue} soon={alerts.soon} className="mt-1.5 text-xs" />
+          ) : (
+            <p className="mt-1 text-xs text-slate-400">Süresi geçen veya yaklaşan iş yok</p>
+          )}
         </article>
       </div>
 
@@ -126,7 +149,7 @@ export default function DashboardPage() {
         <section className="min-w-0 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-teal-800/40 dark:bg-[#0f2220]">
           <div className="flex items-center justify-between px-5 py-4">
             <h2 className="font-semibold text-slate-900 dark:text-teal-50">Yaklaşan görevler</h2>
-            <Link href="/tasks" className="text-sm font-medium text-slate-500 hover:text-slate-900 dark:hover:text-teal-200">
+            <Link href="/tasks?view=in_progress" className="text-sm font-medium text-slate-500 hover:text-slate-900 dark:hover:text-teal-200">
               Tümünü gör
             </Link>
           </div>
@@ -136,7 +159,7 @@ export default function DashboardPage() {
               return (
                 <li key={`${task.meeting_id}-${task.action_seq}`}>
                   <Link
-                    href="/tasks"
+                    href={`/tasks?task=${task.meeting_id}-${task.action_seq}`}
                     className={`flex cursor-pointer gap-3 rounded-xl border p-4 shadow-sm transition-shadow ${
                       tone === "overdue"
                         ? "border-rose-400 bg-rose-50 hover:border-rose-500 hover:shadow-[0_0_18px_rgba(244,63,94,0.45)] dark:border-rose-700 dark:bg-rose-950/50"
@@ -146,11 +169,11 @@ export default function DashboardPage() {
                     }`}
                   >
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-base font-semibold text-slate-900 dark:text-teal-50">{task.title}</p>
-                      <p className="mt-1.5 truncate text-sm font-semibold text-slate-700 dark:text-teal-100">
+                      <p className="break-words text-base font-semibold text-slate-900 dark:text-teal-50">{task.title}</p>
+                      <p className="mt-1.5 text-sm font-semibold text-slate-700 dark:text-teal-100">
                         {task.assignee?.trim() ? `Sorumlu: ${task.assignee}` : "Sorumlu yok"}
                       </p>
-                      <p className="mt-2 truncate text-xs font-medium text-slate-500">
+                      <p className="mt-2 truncate text-xs font-medium text-slate-500" title={`Toplantı: ${task.meeting_title}`}>
                         Toplantı: {task.meeting_title}
                       </p>
                       <DueHint dueDate={dateOnly(task.due_date) || task.due_date} />

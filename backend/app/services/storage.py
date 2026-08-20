@@ -28,7 +28,8 @@ def save_audio(user_id: int, filename: str, data: bytes) -> str:
     if suffix not in ALLOWED_AUDIO_SUFFIXES:
         raise StorageError("Sadece MP3, WAV veya M4A yükleyebilirsiniz")
     if len(data) > settings.max_upload_bytes:
-        raise StorageError("Dosya 100 MB sınırını aşıyor")
+        limit_mb = settings.max_upload_bytes // (1024 * 1024)
+        raise StorageError(f"Dosya {limit_mb} MB sınırını aşıyor")
 
     dest_dir = _upload_root() / str(user_id)
     dest_dir.mkdir(parents=True, exist_ok=True)

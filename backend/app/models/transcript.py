@@ -15,5 +15,7 @@ class Transcript(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     timestamp: Mapped[int] = mapped_column(Integer, nullable=False)
     speaker: Mapped[str | None] = mapped_column(String(64))
+    speaker_origin: Mapped[str | None] = mapped_column(String(64))
+    flags: Mapped[str | None] = mapped_column(Text)
 
     meeting: Mapped["Meeting"] = relationship(back_populates="transcripts")

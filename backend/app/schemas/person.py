@@ -1,12 +1,19 @@
 from pydantic import BaseModel, Field
 
 
+class PersonMeetingOut(BaseModel):
+    meeting_id: int
+    title: str
+    date: str | None = None
+
+
 class PersonOut(BaseModel):
     person_id: int
     name: str
     note: str | None = None
     label: str
     attendee: bool = False
+    meetings: list[PersonMeetingOut] = Field(default_factory=list)
 
 
 class PersonCreate(BaseModel):

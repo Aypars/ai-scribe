@@ -83,6 +83,7 @@ export type Person = {
   note: string | null;
   label: string;
   attendee?: boolean;
+  meetings?: { meeting_id: number; title: string; date: string | null }[];
 };
 
 export type Meeting = {
@@ -96,11 +97,19 @@ export type Meeting = {
   audio_path: string | null;
 };
 
+export type TranscriptFlag = {
+  original: string;
+  suggestion: string;
+  reason: string;
+};
+
 export type TranscriptLine = {
   seq: number;
   timestamp: number;
   text: string;
   speaker: string | null;
+  speaker_origin?: string | null;
+  flags?: TranscriptFlag[];
 };
 
 export type ActionItem = {
@@ -204,7 +213,12 @@ export async function updateMeeting(
 
 export async function renameMeetingSpeaker(
   id: number,
-  body: { speaker: string; seq?: number; from_speaker?: string },
+  body: {
+    speaker?: string;
+    seq?: number;
+    from_speaker?: string;
+    action?: "confirm" | "reject";
+  },
 ): Promise<MeetingDetail> {
   const response = await fetch(`${API_URL}/api/v1/meetings/${id}/speakers`, {
     method: "PATCH",
@@ -217,7 +231,7 @@ export async function renameMeetingSpeaker(
 
 export async function updateTranscriptLine(
   id: number,
-  body: { seq: number; text: string },
+  body: { seq: number; text: string; flags?: TranscriptFlag[] | null },
 ): Promise<MeetingDetail> {
   const response = await fetch(`${API_URL}/api/v1/meetings/${id}`, {
     method: "PATCH",
@@ -258,17 +272,12 @@ export async function dismissMeetingAction(id: number, seq: number): Promise<Mee
 }
 
 export async function analyzeMeeting(id: number): Promise<MeetingDetail> {
-  const response = await fetch(`${API_URL}/api/v1/meetings/${id}`, {
-    method: "PATCH",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
-    body: JSON.stringify({ analyze: true }),
-  });
-  if (!response.ok) throw new Error(await readError(response));
-  const detail = await fetch(`${API_URL}/api/v1/meetings/${id}`, {
+  const response = await fetch(`${API_URL}/api/v1/meetings/${id}/analyze`, {
+    method: "POST",
     headers: authHeader(),
   });
-  if (!detail.ok) throw new Error(await readError(detail));
-  return detail.json();
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
 }
 
 export async function deleteMeeting(id: number): Promise<void> {
@@ -392,6 +401,27 @@ export async function createPerson(body: { name: string; note?: string }): Promi
   });
   if (!response.ok) throw new Error(await readError(response));
   return response.json();
+}
+
+export async function updatePerson(
+  personId: number,
+  body: { name?: string; note?: string | null },
+): Promise<Person> {
+  const response = await fetch(`${API_URL}/api/v1/people/${personId}`, {
+    method: "PATCH",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
+export async function deletePerson(personId: number): Promise<void> {
+  const response = await fetch(`${API_URL}/api/v1/people/${personId}`, {
+    method: "DELETE",
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(await readError(response));
 }
 
 export async function ensurePerson(

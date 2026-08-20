@@ -119,7 +119,7 @@ export default function NewMeetingPage() {
               <div className="flex min-h-40 flex-col items-center justify-center px-4 py-10">
                 <span className="mb-2 text-2xl text-indigo-400">♪</span>
                 <p className="font-medium text-slate-800 dark:text-teal-50">Dosyayı buraya sürükle ve bırak</p>
-                <p className="mt-1 text-xs text-slate-400">MP3, WAV ve M4A · Maks. 100 MB</p>
+                <p className="mt-1 text-xs text-slate-400">MP3, WAV ve M4A · Maks. 500 MB</p>
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}

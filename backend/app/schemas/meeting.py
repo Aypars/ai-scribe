@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,11 +35,19 @@ class MeetingOut(BaseModel):
     audio_path: str | None
 
 
+class TranscriptFlagOut(BaseModel):
+    original: str
+    suggestion: str
+    reason: str = ""
+
+
 class TranscriptLineOut(BaseModel):
     seq: int
     timestamp: int
     text: str
     speaker: str | None = None
+    speaker_origin: str | None = None
+    flags: list[TranscriptFlagOut] = Field(default_factory=list)
 
 
 class ActionOut(BaseModel):
@@ -76,6 +85,7 @@ class ActionPatchIn(BaseModel):
 class TranscriptEditIn(BaseModel):
     seq: int
     text: str = Field(..., min_length=1, max_length=8000)
+    flags: list[TranscriptFlagOut] | None = None
 
 
 class MeetingUpdate(BaseModel):
@@ -90,6 +100,7 @@ class MeetingUpdate(BaseModel):
 
 
 class SpeakerRenameIn(BaseModel):
-    speaker: str = Field(..., min_length=1, max_length=64)
+    speaker: str | None = Field(default=None, max_length=64)
     seq: int | None = None
     from_speaker: str | None = Field(default=None, max_length=64)
+    action: Literal["confirm", "reject"] | None = None

@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { AppShell } from "@/components/AppShell";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { MeetingBadge, TaskBadge, DueHint } from "@/components/StatusBadge";
 import { PersonPicker } from "@/components/PersonPicker";
 import { useToast } from "@/components/Toast";
@@ -23,6 +24,7 @@ import {
   type ActionItem,
   type Decision,
   type MeetingDetail,
+  type TranscriptFlag,
   type TranscriptLine,
 } from "@/lib/api";
 import { dateOnly, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/demo-data";
@@ -203,6 +205,98 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
   return <>{parts}</>;
 }
 
+function findFlagSpan(text: string, original: string): { start: number; end: number } | null {
+  if (!original) return null;
+  const exact = text.indexOf(original);
+  if (exact >= 0) return { start: exact, end: exact + original.length };
+  const start = foldTr(text).indexOf(foldTr(original));
+  if (start < 0) return null;
+  return { start, end: start + original.length };
+}
+
+function FlaggedLineText({
+  line,
+  query,
+  busy,
+  openIndex,
+  onToggle,
+  onApply,
+  onDismiss,
+}: {
+  line: TranscriptLine;
+  query: string;
+  busy: boolean;
+  openIndex: number | null;
+  onToggle: (index: number | null) => void;
+  onApply: (index: number) => void;
+  onDismiss: (index: number) => void;
+}) {
+  const flags = line.flags ?? [];
+  if (query.trim()) return <HighlightedText text={line.text} query={query} />;
+  if (!flags.length) return <>{line.text}</>;
+
+  const spans = flags
+    .map((flag, index) => {
+      const span = findFlagSpan(line.text, flag.original);
+      return span ? { ...span, index, flag } : null;
+    })
+    .filter((item): item is { start: number; end: number; index: number; flag: TranscriptFlag } => item != null)
+    .sort((a, b) => a.start - b.start);
+
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const item of spans) {
+    if (item.start < cursor) continue;
+    if (item.start > cursor) parts.push(line.text.slice(cursor, item.start));
+    parts.push(
+      <span key={`flag-${item.index}`} className="relative inline">
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggle(openIndex === item.index ? null : item.index);
+          }}
+          className="cursor-pointer underline decoration-wavy decoration-rose-500 underline-offset-2 dark:decoration-rose-400"
+        >
+          {line.text.slice(item.start, item.end)}
+        </button>
+        {openIndex === item.index ? (
+          <span
+            className="absolute top-full left-0 z-30 mt-1 w-64 rounded-xl border border-slate-200 bg-white p-3 text-left text-slate-800 shadow-lg dark:border-teal-800 dark:bg-[#0f2220] dark:text-teal-50"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <p className="text-[11px] font-medium text-rose-600 dark:text-rose-300">
+              {item.flag.reason || "Olası transkript hatası"}
+            </p>
+            <p className="mt-1 text-sm leading-5">{item.flag.suggestion}</p>
+            <span className="mt-2 flex gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onApply(item.index)}
+                className="h-7 cursor-pointer rounded-md bg-teal-700 px-2.5 text-[11px] font-medium text-white hover:bg-teal-800 disabled:opacity-50"
+              >
+                Uygula
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onDismiss(item.index)}
+                className="h-7 cursor-pointer rounded-md px-2.5 text-[11px] font-medium text-slate-500 hover:bg-slate-100 dark:hover:bg-teal-900/40"
+              >
+                Yoksay
+              </button>
+            </span>
+          </span>
+        ) : null}
+      </span>,
+    );
+    cursor = item.end;
+  }
+  if (cursor < line.text.length) parts.push(line.text.slice(cursor));
+  return <>{parts}</>;
+}
+
 function uniqueSpeakers(lines: TranscriptLine[]): { name: string; count: number }[] {
   const seen: string[] = [];
   for (const line of lines) {
@@ -291,13 +385,13 @@ function LineSpeaker({
   onRenameAll: () => void;
 }) {
   return (
-    <div className="relative inline-block">
+    <div className="relative inline-flex items-center">
       <button
         type="button"
         onClick={() => onOpen(seq, name)}
         className="cursor-pointer font-semibold text-slate-800 hover:text-teal-700 hover:underline dark:text-teal-100 dark:hover:text-teal-300"
       >
-        {name}
+        {name.replace(/\s*\?+\s*$/, "").trim() || name}
       </button>
       {editing ? (
         <SpeakerRenameBox
@@ -342,27 +436,176 @@ function TranscriptAudioPlayer({
   audioRef: RefObject<HTMLAudioElement | null>;
   onTimeUpdate: (time: number) => void;
 }) {
+  const [playing, setPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [time, setTime] = useState(0);
+  const [rate, setRate] = useState(1);
+  const dragging = useRef(false);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+
+    const syncTime = () => {
+      if (!dragging.current) setTime(el.currentTime);
+      onTimeUpdate(el.currentTime);
+    };
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+    const onMeta = () => setDuration(Number.isFinite(el.duration) ? el.duration : 0);
+    const onEnded = () => setPlaying(false);
+
+    el.addEventListener("play", onPlay);
+    el.addEventListener("pause", onPause);
+    el.addEventListener("timeupdate", syncTime);
+    el.addEventListener("seeked", syncTime);
+    el.addEventListener("loadedmetadata", onMeta);
+    el.addEventListener("durationchange", onMeta);
+    el.addEventListener("ended", onEnded);
+    onMeta();
+    setPlaying(!el.paused);
+    return () => {
+      el.removeEventListener("play", onPlay);
+      el.removeEventListener("pause", onPause);
+      el.removeEventListener("timeupdate", syncTime);
+      el.removeEventListener("seeked", syncTime);
+      el.removeEventListener("loadedmetadata", onMeta);
+      el.removeEventListener("durationchange", onMeta);
+      el.removeEventListener("ended", onEnded);
+    };
+  }, [audioRef, onTimeUpdate, src]);
+
+  useEffect(() => {
+    setPlaying(false);
+    setTime(0);
+    setDuration(0);
+  }, [src]);
+
+  const percent = duration > 0 ? Math.min(100, (time / duration) * 100) : 0;
+
+  function togglePlay() {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) void el.play();
+    else el.pause();
+  }
+
+  function seekTo(next: number) {
+    const el = audioRef.current;
+    if (!el || !Number.isFinite(next)) return;
+    const clamped = Math.min(duration || next, Math.max(0, next));
+    el.currentTime = clamped;
+    setTime(clamped);
+    onTimeUpdate(clamped);
+  }
+
+  function skip(delta: number) {
+    seekTo(time + delta);
+  }
+
+  function cycleRate() {
+    const next = rate >= 2 ? 1 : rate >= 1.5 ? 2 : rate >= 1.25 ? 1.5 : 1.25;
+    setRate(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  }
+
   return (
-    <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-teal-800/60 dark:bg-[#0c1c1b]">
-      <p className="mb-2 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
-        Kayıt
-      </p>
+    <div className="mb-6 rounded-2xl border border-slate-200 bg-gradient-to-r from-teal-50 to-white px-4 py-4 dark:border-teal-800/70 dark:from-teal-950/70 dark:to-[#0c1c1b]">
+      <audio
+        ref={audioRef}
+        src={src ?? undefined}
+        preload="metadata"
+        className="hidden"
+      />
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900 dark:text-teal-50">Kayıt</p>
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            Transkript satırına tıklayınca kayıt o ana gider
+          </p>
+        </div>
+        {src ? (
+          <button
+            type="button"
+            onClick={cycleRate}
+            className="h-8 shrink-0 cursor-pointer rounded-full border border-teal-200 bg-white px-3 text-xs font-semibold text-teal-800 hover:bg-teal-50 dark:border-teal-700 dark:bg-teal-950 dark:text-teal-100 dark:hover:bg-teal-900"
+          >
+            {rate}x
+          </button>
+        ) : null}
+      </div>
       {src ? (
-        <audio
-          ref={audioRef}
-          src={src}
-          controls
-          preload="metadata"
-          className="h-10 w-full accent-teal-600"
-          onTimeUpdate={(event) => onTimeUpdate(event.currentTarget.currentTime)}
-          onSeeked={(event) => onTimeUpdate(event.currentTarget.currentTime)}
-        />
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => skip(-10)}
+            aria-label="10 saniye geri"
+            className="hidden h-9 min-w-9 shrink-0 cursor-pointer items-center justify-center rounded-full px-2 text-xs font-semibold text-teal-800 hover:bg-teal-100 sm:flex dark:text-teal-100 dark:hover:bg-teal-900/60"
+          >
+            −10
+          </button>
+          <button
+            type="button"
+            onClick={togglePlay}
+            aria-label={playing ? "Duraklat" : "Oynat"}
+            className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full bg-teal-700 text-white shadow-sm hover:bg-teal-800"
+          >
+            {playing ? (
+              <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor" aria-hidden>
+                <rect x="6.5" y="5" width="4" height="14" rx="1" />
+                <rect x="13.5" y="5" width="4" height="14" rx="1" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" className="ml-0.5 h-5 w-5" fill="currentColor" aria-hidden>
+                <path d="M8 5.5v13l11-6.5L8 5.5Z" />
+              </svg>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => skip(10)}
+            aria-label="10 saniye ileri"
+            className="hidden h-9 min-w-9 shrink-0 cursor-pointer items-center justify-center rounded-full px-2 text-xs font-semibold text-teal-800 hover:bg-teal-100 sm:flex dark:text-teal-100 dark:hover:bg-teal-900/60"
+          >
+            +10
+          </button>
+          <span className="w-11 shrink-0 text-right text-xs font-medium tabular-nums text-slate-600 dark:text-teal-200">
+            {formatTimestamp(Math.floor(time))}
+          </span>
+          <div className="relative h-7 min-w-0 flex-1">
+            <div className="pointer-events-none absolute top-1/2 right-0 left-0 h-1.5 -translate-y-1/2 rounded-full bg-slate-200 dark:bg-teal-950" />
+            <div
+              className="pointer-events-none absolute top-1/2 left-0 h-1.5 -translate-y-1/2 rounded-full bg-teal-600"
+              style={{ width: `${percent}%` }}
+            />
+            <input
+              type="range"
+              min={0}
+              max={duration || 0}
+              step={0.1}
+              value={Number.isFinite(time) ? time : 0}
+              aria-label="Kayıt konumu"
+              onPointerDown={() => {
+                dragging.current = true;
+              }}
+              onPointerUp={() => {
+                dragging.current = false;
+              }}
+              onChange={(event) => {
+                seekTo(Number(event.target.value));
+              }}
+              className="absolute inset-0 w-full cursor-pointer appearance-none bg-transparent [&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:w-3.5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-teal-700 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-teal-700"
+            />
+          </div>
+          <span className="w-11 shrink-0 text-xs font-medium tabular-nums text-slate-500 dark:text-slate-400">
+            {formatTimestamp(Math.floor(duration))}
+          </span>
+        </div>
       ) : loading ? (
         <p className="text-sm text-slate-400">Ses yükleniyor…</p>
       ) : (
         <p className="text-sm text-rose-500">{error ?? "Ses kaydı açılamadı."}</p>
       )}
-      <p className="mt-2 text-xs text-slate-400">Bir satıra tıklayınca kayıt o ana gider.</p>
     </div>
   );
 }
@@ -388,12 +631,11 @@ export default function MeetingDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const toast = useToast();
+  const confirm = useConfirm();
   const [tab, setTab] = useState<TabId>("transcript");
   const [meeting, setMeeting] = useState<MeetingDetail | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
   const [selected, setSelected] = useState<ActionItem | null>(null);
-  const [convertItem, setConvertItem] = useState<ActionItem | null>(null);
-  const [convertDue, setConvertDue] = useState("");
   const [actionNote, setActionNote] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -408,6 +650,7 @@ export default function MeetingDetailPage() {
   const [lineName, setLineName] = useState("");
   const [textEdit, setTextEdit] = useState<{ seq: number; value: string } | null>(null);
   const [textBusy, setTextBusy] = useState(false);
+  const [flagOpen, setFlagOpen] = useState<{ seq: number; index: number } | null>(null);
   const [bulkEdit, setBulkEdit] = useState<string | null>(null);
   const [bulkName, setBulkName] = useState("");
   const [filterSpeaker, setFilterSpeaker] = useState<string | null>(null);
@@ -422,6 +665,10 @@ export default function MeetingDetailPage() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const pendingSeekRef = useRef<number | null>(null);
   const focusRef = useRef<HTMLLIElement | null>(null);
+  const activeLineRef = useRef<HTMLLIElement | null>(null);
+  const transcriptBoxRef = useRef<HTMLDivElement | null>(null);
+  const lastFollowedSeq = useRef<number | null>(null);
+  const [followAudio, setFollowAudio] = useState(true);
 
   const [elapsed, setElapsed] = useState(0);
   const [fromUpload, setFromUpload] = useState(false);
@@ -429,7 +676,6 @@ export default function MeetingDetailPage() {
     const pollRef = useRef(true);
     const startedAtRef = useRef<number | null>(null);
     const analysisBusyRef = useRef(false);
-    const analysisSeenRef = useRef(false);
 
   useEffect(() => {
     setFromUpload(new URLSearchParams(window.location.search).get("transcribing") === "1");
@@ -460,17 +706,16 @@ export default function MeetingDetailPage() {
         if (cancelled) return;
         setError(null);
         statusRef.current = data.status;
-        const analyzingNow =
-          data.transcription?.message === "Analiz ediliyor…" ||
-          data.transcription?.message === "Analiz bekleniyor…" ||
-          (data.status === "transcribed" && !data.transcription?.error);
-        if (analyzingNow) analysisSeenRef.current = true;
-        if (analysisSeenRef.current && !analyzingNow && data.status === "analyzed") {
+        const serverAnalyzing =
+          Boolean(data.transcription?.message) &&
+          data.status !== "uploaded" &&
+          data.status !== "failed" &&
+          !data.transcription?.error;
+        if (analysisBusyRef.current && !serverAnalyzing && data.status === "analyzed") {
           analysisBusyRef.current = false;
-          analysisSeenRef.current = false;
         }
-        const busy = analysisBusyRef.current || analyzingNow;
-        pollRef.current = data.status === "uploaded" || busy;
+        const busy = serverAnalyzing || analysisBusyRef.current;
+        pollRef.current = data.status === "uploaded" || serverAnalyzing || analysisBusyRef.current;
         setAnalysisBusy(busy);
         setMeeting(data);
         setActionItems(data.actions.map((item) => ({ ...item })));
@@ -570,12 +815,23 @@ export default function MeetingDetailPage() {
   }, [audioUrl]);
 
   useEffect(() => {
-    if (tab !== "transcript" || focusSeq == null) return;
+    if (tab !== "transcript") return;
+    const line = focusSeq != null ? focusRef.current : followAudio ? activeLineRef.current : null;
+    const box = transcriptBoxRef.current;
+    if (!line || !box) return;
+    const seq = Number(line.dataset.seq);
+    if (!Number.isFinite(seq)) return;
+    if (focusSeq == null && lastFollowedSeq.current === seq) return;
+    lastFollowedSeq.current = seq;
     const frame = window.requestAnimationFrame(() => {
-      focusRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      const boxRect = box.getBoundingClientRect();
+      const lineRect = line.getBoundingClientRect();
+      const offset = lineRect.top - boxRect.top - box.clientHeight * 0.32;
+      if (Math.abs(offset) < 12) return;
+      box.scrollBy({ top: offset, behavior: "smooth" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [tab, focusSeq]);
+  }, [tab, focusSeq, followAudio, currentTime]);
 
   async function handleSave() {
     if (!meeting) return;
@@ -600,7 +856,10 @@ export default function MeetingDetailPage() {
 
   async function handleDelete() {
     if (!meeting) return;
-    if (!window.confirm(`“${meeting.title}” silinsin mi?`)) return;
+    const ok = await confirm({
+      message: `“${meeting.title}” silinsin mi? Bu işlem geri alınamaz.`,
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       await deleteMeeting(meeting.meeting_id);
@@ -655,6 +914,53 @@ export default function MeetingDetailPage() {
     }
   }
 
+  async function handleFlagApply(line: TranscriptLine, index: number) {
+    if (!meeting) return;
+    const flag = line.flags?.[index];
+    if (!flag) return;
+    const span = findFlagSpan(line.text, flag.original);
+    const nextText = span
+      ? `${line.text.slice(0, span.start)}${flag.suggestion}${line.text.slice(span.end)}`
+      : line.text;
+    const nextFlags = (line.flags ?? []).filter((_, i) => i !== index);
+    setTextBusy(true);
+    setError(null);
+    try {
+      const updated = await updateTranscriptLine(meeting.meeting_id, {
+        seq: line.seq,
+        text: nextText,
+        flags: nextFlags,
+      });
+      setMeeting({ ...meeting, transcript: updated.transcript });
+      setFlagOpen(null);
+      toast("Düzeltme uygulandı");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Düzeltme uygulanamadı");
+    } finally {
+      setTextBusy(false);
+    }
+  }
+
+  async function handleFlagDismiss(line: TranscriptLine, index: number) {
+    if (!meeting) return;
+    const nextFlags = (line.flags ?? []).filter((_, i) => i !== index);
+    setTextBusy(true);
+    setError(null);
+    try {
+      const updated = await updateTranscriptLine(meeting.meeting_id, {
+        seq: line.seq,
+        text: line.text,
+        flags: nextFlags,
+      });
+      setMeeting({ ...meeting, transcript: updated.transcript });
+      setFlagOpen(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Uyarı kapatılamadı");
+    } finally {
+      setTextBusy(false);
+    }
+  }
+
   async function handleRetryAnalysis() {
     if (!meeting) return;
     setError(null);
@@ -665,6 +971,14 @@ export default function MeetingDetailPage() {
       const updated = await analyzeMeeting(meeting.meeting_id);
       setMeeting(updated);
       setActionItems(updated.actions.map((item) => ({ ...item })));
+      const still =
+        Boolean(updated.transcription?.message) &&
+        updated.status !== "uploaded" &&
+        !updated.transcription?.error;
+      if (!still) {
+        analysisBusyRef.current = false;
+        setAnalysisBusy(false);
+      }
     } catch (err: unknown) {
       analysisBusyRef.current = false;
       setAnalysisBusy(false);
@@ -699,7 +1013,6 @@ export default function MeetingDetailPage() {
           row.seq === item.seq ? { ...row, task_status: task.status, due_date: due } : row,
         ),
       );
-      setConvertItem(null);
       setSelected(null);
       toast("Görev başarıyla oluşturuldu");
     } catch (err: unknown) {
@@ -709,6 +1022,11 @@ export default function MeetingDetailPage() {
 
   async function handleDismissAction(item: ActionItem) {
     if (!meeting) return;
+    const ok = await confirm({
+      title: item.task_status ? "Görevi sil" : "Öneriyi sil",
+      message: `“${item.description}” silinsin mi?`,
+    });
+    if (!ok) return;
     try {
       const updated = await dismissMeetingAction(meeting.meeting_id, item.seq);
       setMeeting(updated);
@@ -790,6 +1108,7 @@ export default function MeetingDetailPage() {
   }
 
   function seekTo(time: number) {
+    setFollowAudio(true);
     const el = audioRef.current;
     if (!el || !audioUrl) {
       pendingSeekRef.current = time;
@@ -942,24 +1261,48 @@ export default function MeetingDetailPage() {
           {error ? <p className="mt-3 text-sm text-rose-600">{error}</p> : null}
         </div>
 
-        <div className="flex gap-6 border-t border-b border-slate-100 px-6 dark:border-teal-900/40">
-          {tabs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                if (item.id !== "decisions") setDecisionView(null);
-                setTab(item.id);
-              }}
-              className={`cursor-pointer border-b-2 py-3 text-sm font-medium ${
-                tab === item.id
-                  ? "border-teal-600 text-slate-900 dark:text-teal-50"
-                  : "border-transparent text-slate-400 hover:text-slate-700"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
+        <div className="border-t border-slate-100 px-4 py-3 dark:border-teal-900/40 sm:px-6">
+          <div className="flex gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 dark:bg-teal-950/70">
+            {tabs.map((item) => {
+              const active = tab === item.id;
+              const count =
+                item.id === "transcript"
+                  ? lines.length
+                  : item.id === "decisions"
+                    ? decisionList.length
+                    : item.id === "actions"
+                      ? actionItems.length
+                      : null;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    if (item.id !== "decisions") setDecisionView(null);
+                    setTab(item.id);
+                  }}
+                  className={`flex shrink-0 cursor-pointer items-center rounded-lg px-3.5 py-2 text-sm font-medium transition ${
+                    active
+                      ? "bg-white text-slate-900 shadow-sm dark:bg-teal-700 dark:text-white"
+                      : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-teal-100"
+                  }`}
+                >
+                  {item.label}
+                  {count != null ? (
+                    <span
+                      className={`ml-1.5 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
+                        active
+                          ? "bg-teal-600 text-white dark:bg-teal-900/60"
+                          : "bg-slate-200 text-slate-500 dark:bg-teal-900 dark:text-slate-400"
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className="p-6">
@@ -1032,7 +1375,17 @@ export default function MeetingDetailPage() {
                   {visibleLines.length === 0 ? (
                     <p className="text-sm text-slate-400">Bu aramaya uyan satır yok.</p>
                   ) : (
-                  <ul className="divide-y divide-slate-100 dark:divide-teal-900/40">
+                  <div
+                    ref={transcriptBoxRef}
+                    onWheel={() => {
+                      if (followAudio) setFollowAudio(false);
+                    }}
+                    onTouchMove={() => {
+                      if (followAudio) setFollowAudio(false);
+                    }}
+                    className="relative max-h-[calc(100dvh-18rem)] overflow-y-auto overscroll-contain rounded-xl border border-slate-200 dark:border-teal-800/50"
+                  >
+                  <ul className="divide-y divide-slate-100 px-2 dark:divide-teal-900/40">
                     {visibleLines.map((line) => {
                       const speaker = line.speaker;
                       const speakerNode = speaker ? (
@@ -1057,7 +1410,15 @@ export default function MeetingDetailPage() {
                       const active = !focused && activeSeq === line.seq;
                       const editingText = textEdit?.seq === line.seq;
                       return (
-                        <li key={line.seq} ref={focused ? focusRef : undefined} className="first:pt-0 last:pb-0">
+                        <li
+                          key={line.seq}
+                          data-seq={line.seq}
+                          ref={(el) => {
+                            if (focused) focusRef.current = el;
+                            if (activeSeq === line.seq) activeLineRef.current = el;
+                          }}
+                          className="first:pt-0 last:pb-0"
+                        >
                           {editingText ? (
                             <div
                               className="rounded-xl bg-slate-50 px-2 py-4 dark:bg-teal-900/20"
@@ -1148,7 +1509,17 @@ export default function MeetingDetailPage() {
                               ) : null}
                             </div>
                             <p className="mt-1 text-sm leading-6 text-slate-800 dark:text-slate-200">
-                              <HighlightedText text={line.text} query={transcriptQuery} />
+                              <FlaggedLineText
+                                line={line}
+                                query={transcriptQuery}
+                                busy={textBusy}
+                                openIndex={flagOpen?.seq === line.seq ? flagOpen.index : null}
+                                onToggle={(index) =>
+                                  setFlagOpen(index == null ? null : { seq: line.seq, index })
+                                }
+                                onApply={(index) => void handleFlagApply(line, index)}
+                                onDismiss={(index) => void handleFlagDismiss(line, index)}
+                              />
                             </p>
                           </div>
                           )}
@@ -1156,10 +1527,25 @@ export default function MeetingDetailPage() {
                       );
                     })}
                   </ul>
+                  {!followAudio && activeSeq != null ? (
+                    <div className="sticky bottom-3 flex justify-center px-2 pb-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          lastFollowedSeq.current = null;
+                          setFollowAudio(true);
+                        }}
+                        className="cursor-pointer rounded-full bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white shadow-lg hover:bg-teal-800"
+                      >
+                        Konuşulan satıra dön
+                      </button>
+                    </div>
+                  ) : null}
+                  </div>
                   )}
                 </div>
                 {speakers.length > 0 ? (
-                  <aside className="lg:w-56 lg:shrink-0 lg:border-l lg:border-slate-100 lg:pl-6 dark:lg:border-teal-800/50">
+                  <aside className="relative z-10 lg:sticky lg:top-4 lg:max-h-[calc(100dvh-18rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto lg:border-l lg:border-slate-100 lg:pl-6 dark:lg:border-teal-800/50">
                     <p className="mb-3 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
                       Konuşmacılar
                     </p>
@@ -1168,14 +1554,9 @@ export default function MeetingDetailPage() {
                         const editing = bulkEdit === item.name;
                         const active = filterSpeaker === item.name;
                         return (
-                          <li
-                            key={item.name}
-                            className={`rounded-xl border p-3 ${
-                              active ? "border-teal-600 bg-teal-50 dark:bg-teal-900/50" : "border-slate-200 dark:border-teal-800"
-                            }`}
-                          >
+                          <li key={item.name}>
                             {editing ? (
-                              <div className="space-y-2">
+                              <div className="space-y-2 rounded-xl border border-teal-600 bg-teal-50 p-3 dark:bg-teal-900/50">
                                 <input
                                   autoFocus
                                   value={bulkName}
@@ -1217,22 +1598,34 @@ export default function MeetingDetailPage() {
                                 </div>
                               </div>
                             ) : (
-                              <div>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setFilterSpeaker((current) => (current === item.name ? null : item.name))
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                onClick={() =>
+                                  setFilterSpeaker((current) => (current === item.name ? null : item.name))
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault();
+                                    setFilterSpeaker((current) => (current === item.name ? null : item.name));
                                   }
-                                  className="w-full cursor-pointer text-left"
-                                >
-                                  <p className={`text-sm font-semibold ${active ? "text-teal-800 dark:text-teal-200" : "text-slate-800 dark:text-slate-200"}`}>
-                                    {item.name}
-                                  </p>
-                                  <p className="mt-0.5 text-xs text-slate-400">{item.count} satır</p>
-                                </button>
+                                }}
+                                className={`w-full cursor-pointer rounded-xl border p-3 text-left transition-colors ${
+                                  active
+                                    ? "border-teal-600 bg-teal-50 dark:bg-teal-900/50"
+                                    : "border-slate-200 hover:border-teal-400 hover:bg-slate-50 dark:border-teal-800 dark:hover:bg-teal-900/30"
+                                }`}
+                              >
+                                <p className={`text-sm font-semibold ${active ? "text-teal-800 dark:text-teal-200" : "text-slate-800 dark:text-slate-200"}`}>
+                                  {item.name.replace(/\s*\?+\s*$/, "").trim() || item.name}
+                                </p>
+                                <p className="mt-0.5 text-xs text-slate-400">{item.count} satır</p>
                                 <button
                                   type="button"
-                                  onClick={() => openBulkEdit(item.name)}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    openBulkEdit(item.name);
+                                  }}
                                   className="mt-2 cursor-pointer text-xs font-medium text-slate-500 hover:text-teal-700"
                                 >
                                   Adı değiştir
@@ -1261,9 +1654,19 @@ export default function MeetingDetailPage() {
                       .split(/\n+/)
                       .map((para) => para.trim())
                       .filter(Boolean)
-                      .map((para, index) => (
-                        <p key={index}>{para}</p>
-                      ))}
+                      .map((para, index) => {
+                        const heading = para.length <= 80 && !/[.!?…]$/.test(para);
+                        return heading ? (
+                          <h3
+                            key={index}
+                            className="pt-2 text-sm font-semibold tracking-tight text-slate-900 dark:text-teal-50"
+                          >
+                            {para}
+                          </h3>
+                        ) : (
+                          <p key={index}>{para}</p>
+                        );
+                      })}
                   </div>
                 </div>
               ) : meeting.status === "transcribed" && meeting.transcription?.error ? (
@@ -1402,11 +1805,11 @@ export default function MeetingDetailPage() {
                       key={item.seq}
                       role="button"
                       tabIndex={0}
-                      onClick={() => setSelected(item)}
+                      onClick={() => setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() })}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          setSelected(item);
+                          setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() });
                         }
                       }}
                       className={`flex cursor-pointer flex-col gap-3 rounded-xl border p-4 shadow-sm transition-shadow sm:flex-row sm:items-center sm:justify-between ${
@@ -1435,7 +1838,7 @@ export default function MeetingDetailPage() {
                       </div>
                       {item.task_status ? (
                         <div className="flex shrink-0 items-center gap-3">
-                          <TaskBadge status={item.task_status} />
+                          <TaskBadge status={item.task_status} dueDate={item.due_date} />
                           <button
                             type="button"
                             onClick={(e) => {
@@ -1463,9 +1866,7 @@ export default function MeetingDetailPage() {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSelected(null);
-                              setConvertItem(item);
-                              setConvertDue(todayISO());
+                              setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() });
                             }}
                             className="cursor-pointer rounded-lg bg-teal-700 px-3 py-2 text-sm font-medium text-white hover:bg-teal-800"
                           >
@@ -1517,24 +1918,24 @@ export default function MeetingDetailPage() {
                   }}
                 />
               </label>
-              {selected.task_status ? (
-                <label className="flex flex-col gap-1.5">
-                  <span className="font-medium text-slate-700">Son tarih</span>
-                  <input
-                    type="date"
-                    required
-                    min={
-                      dateOnly(selected.due_date) && dateOnly(selected.due_date) < todayISO()
-                        ? dateOnly(selected.due_date)
-                        : todayISO()
-                    }
-                    value={dateOnly(selected.due_date)}
-                    onChange={(e) => setSelected({ ...selected, due_date: e.target.value })}
-                    className={field}
-                  />
+              <label className="flex flex-col gap-1.5">
+                <span className="font-medium text-slate-700">Son tarih</span>
+                <input
+                  type="date"
+                  required
+                  min={
+                    dateOnly(selected.due_date) && dateOnly(selected.due_date) < todayISO()
+                      ? dateOnly(selected.due_date)
+                      : todayISO()
+                  }
+                  value={dateOnly(selected.due_date) || todayISO()}
+                  onChange={(e) => setSelected({ ...selected, due_date: e.target.value })}
+                  className={field}
+                />
+                {selected.task_status ? (
                   <DueHint dueDate={selected.due_date} alert={selected.task_status !== "done"} />
-                </label>
-              ) : null}
+                ) : null}
+              </label>
               <label className="flex flex-col gap-1.5">
                 <span className="font-medium text-slate-700">Açıklama</span>
                 <textarea
@@ -1549,11 +1950,7 @@ export default function MeetingDetailPage() {
               {!selected.task_status ? (
                 <button
                   type="button"
-                  onClick={() => {
-                    setConvertItem(selected);
-                    setConvertDue(todayISO());
-                    setSelected(null);
-                  }}
+                  onClick={() => void handleCreateTask(selected, selected.due_date || todayISO())}
                   className="h-11 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800"
                 >
                   Görev oluştur
@@ -1582,48 +1979,6 @@ export default function MeetingDetailPage() {
               </button>
             </div>
           </aside>
-        </div>
-      )}
-
-      {convertItem && (
-        <div
-          className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/40 p-4"
-          onClick={() => setConvertItem(null)}
-        >
-          <div
-            className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-xl dark:border-teal-800 dark:bg-[#0f2220]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="text-base font-semibold text-slate-900 dark:text-teal-50">Göreve çevir</h2>
-            <p className="mt-1 text-sm text-slate-500">{convertItem.description}</p>
-            <label className="mt-4 flex flex-col gap-1.5 text-sm">
-              <span className="font-medium text-slate-700 dark:text-teal-200">Teslim tarihi</span>
-              <input
-                type="date"
-                required
-                min={todayISO()}
-                value={convertDue}
-                onChange={(e) => setConvertDue(e.target.value)}
-                className={field}
-              />
-            </label>
-            <div className="mt-5 flex gap-2">
-              <button
-                type="button"
-                onClick={() => void handleCreateTask(convertItem, convertDue)}
-                className="h-10 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800"
-              >
-                Oluştur
-              </button>
-              <button
-                type="button"
-                onClick={() => setConvertItem(null)}
-                className="h-10 cursor-pointer rounded-lg px-3 text-sm font-medium text-slate-500 hover:bg-slate-50 dark:hover:bg-teal-900/40"
-              >
-                Vazgeç
-              </button>
-            </div>
-          </div>
         </div>
       )}
     </AppShell>

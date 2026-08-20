@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
+import { useConfirm } from "@/components/ConfirmDialog";
 import { MeetingBadge } from "@/components/StatusBadge";
 import { useToast } from "@/components/Toast";
 import { deleteMeeting, fetchMeetings, type Meeting, type MeetingStatus } from "@/lib/api";
@@ -21,6 +22,7 @@ const filters: { value: "all" | MeetingStatus; label: string }[] = [
 export default function MeetingsPage() {
   const router = useRouter();
   const toast = useToast();
+  const confirm = useConfirm();
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<"all" | MeetingStatus>("all");
@@ -59,8 +61,23 @@ export default function MeetingsPage() {
     });
   }, [meetings, query, status]);
 
+  const filterCounts = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const searched = meetings.filter((meeting) =>
+      [meeting.title, meeting.description ?? ""].join(" ").toLowerCase().includes(q),
+    );
+    const counts: Record<string, number> = { all: searched.length };
+    for (const meeting of searched) {
+      counts[meeting.status] = (counts[meeting.status] ?? 0) + 1;
+    }
+    return counts;
+  }, [meetings, query]);
+
   async function handleDelete(meeting: Meeting) {
-    if (!window.confirm(`“${meeting.title}” silinsin mi?`)) return;
+    const ok = await confirm({
+      message: `“${meeting.title}” silinsin mi? Bu işlem geri alınamaz.`,
+    });
+    if (!ok) return;
     setBusyId(meeting.meeting_id);
     setError(null);
     try {
@@ -101,19 +118,34 @@ export default function MeetingsPage() {
               className="h-10 w-full rounded-lg border border-slate-200 bg-white pr-3 pl-9 text-sm outline-none focus:border-slate-400 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50 dark:focus:border-teal-500"
             />
           </div>
-          <div className="flex flex-wrap gap-1">
-            {filters.map((item) => (
-              <button
-                key={item.value}
-                type="button"
-                onClick={() => setStatus(item.value)}
-                className={`cursor-pointer rounded-full px-3 py-1.5 text-xs font-medium ${
-                  status === item.value ? "bg-teal-700 text-white" : "bg-slate-100 text-slate-500 hover:bg-slate-200 dark:bg-teal-950 dark:text-slate-400 dark:hover:bg-teal-900"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
+          <div className="flex min-w-0 max-w-full gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 dark:bg-teal-950/70">
+            {filters.map((item) => {
+              const active = status === item.value;
+              const count = filterCounts[item.value] ?? 0;
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => setStatus(item.value)}
+                  className={`flex shrink-0 cursor-pointer items-center rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+                    active
+                      ? "bg-white text-slate-900 shadow-sm dark:bg-teal-700 dark:text-white"
+                      : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-teal-100"
+                  }`}
+                >
+                  {item.label}
+                  <span
+                    className={`ml-1.5 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
+                      active
+                        ? "bg-teal-600 text-white dark:bg-teal-900/60"
+                        : "bg-slate-200 text-slate-500 dark:bg-teal-900 dark:text-slate-400"
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
         <table className="w-full text-left text-sm">

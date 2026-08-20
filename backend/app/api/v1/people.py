@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -57,3 +57,16 @@ def update_person(
     db.commit()
     db.refresh(person)
     return people_repo.to_out_in_directory(db, current_user.user_id, person)
+
+
+@router.delete("/{person_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_person(
+    person_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    person = people_repo.get_for_user(db, current_user.user_id, person_id)
+    if person is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Kişi bulunamadı")
+    people_repo.delete_person(db, person)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -11,6 +11,7 @@ const nav = [
   { href: "/", label: "Dashboard", match: (path: string) => path === "/" },
   { href: "/meetings", label: "Toplantılar", match: (path: string) => path.startsWith("/meetings") },
   { href: "/tasks", label: "Görevler", match: (path: string) => path.startsWith("/tasks") },
+  { href: "/people", label: "Kişiler", match: (path: string) => path.startsWith("/people") },
 ];
 
 function initials(name: string): string {

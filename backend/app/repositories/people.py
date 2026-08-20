@@ -7,7 +7,7 @@ from app.models.meeting_person import MeetingPerson
 from app.models.person import Person
 from app.models.task import Task
 from app.models.transcript import Transcript
-from app.schemas.person import PersonOut
+from app.schemas.person import PersonOut, PersonMeetingOut
 
 
 def _label(person: Person, *, duplicate_index: int | None = None) -> str:
@@ -17,13 +17,20 @@ def _label(person: Person, *, duplicate_index: int | None = None) -> str:
     return base
 
 
-def to_out(person: Person, *, attendee: bool = False, duplicate_index: int | None = None) -> PersonOut:
+def to_out(
+    person: Person,
+    *,
+    attendee: bool = False,
+    duplicate_index: int | None = None,
+    meetings: list[PersonMeetingOut] | None = None,
+) -> PersonOut:
     return PersonOut(
         person_id=person.person_id,
         name=person.name,
         note=person.note,
         label=_label(person, duplicate_index=duplicate_index),
         attendee=attendee,
+        meetings=meetings or [],
     )
 
 
@@ -45,7 +52,13 @@ def _duplicate_indexes(rows: list[Person]) -> dict[int, int | None]:
 
 def to_out_in_directory(db: Session, user_id: int, person: Person, *, attendee: bool = False) -> PersonOut:
     indexes = _duplicate_indexes(list_for_user(db, user_id))
-    return to_out(person, attendee=attendee, duplicate_index=indexes.get(person.person_id))
+    meetings = _meetings_by_person_id(db, user_id)
+    return to_out(
+        person,
+        attendee=attendee,
+        duplicate_index=indexes.get(person.person_id),
+        meetings=meetings.get(person.person_id, []),
+    )
 
 
 def list_for_user(db: Session, user_id: int) -> list[Person]:
@@ -54,30 +67,60 @@ def list_for_user(db: Session, user_id: int) -> list[Person]:
     )
 
 
-def assigned_person_ids(db: Session) -> set[int]:
-    return {
-        value
-        for value in db.scalars(select(Task.assignee_id).where(Task.assignee_id.isnot(None))).all()
-        if value
-    }
-
-
 def prune_unassigned_people(db: Session) -> None:
-    used = assigned_person_ids(db)
-    people = list(db.scalars(select(Person)).all())
-    for person in people:
-        if person.person_id in used:
-            continue
-        for link in list(db.scalars(select(MeetingPerson).where(MeetingPerson.person_id == person.person_id)).all()):
-            db.delete(link)
-        db.delete(person)
-    db.flush()
+    # Directory people stay even if they have no tasks or meetings.
+    return
+
+
+def _meetings_by_person_id(db: Session, user_id: int) -> dict[int, list[PersonMeetingOut]]:
+    grouped: dict[int, dict[int, PersonMeetingOut]] = {}
+
+    def add(person_id: int | None, meeting_id: int, title: str, date) -> None:
+        if person_id is None:
+            return
+        bucket = grouped.setdefault(person_id, {})
+        if meeting_id in bucket:
+            return
+        bucket[meeting_id] = PersonMeetingOut(
+            meeting_id=meeting_id,
+            title=title,
+            date=date.isoformat() if date is not None else None,
+        )
+
+    for person_id, meeting_id, title, date in db.execute(
+        select(MeetingPerson.person_id, Meeting.meeting_id, Meeting.title, Meeting.date)
+        .join(Meeting, Meeting.meeting_id == MeetingPerson.meeting_id)
+        .where(Meeting.user_id == user_id)
+    ).all():
+        add(person_id, meeting_id, title, date)
+
+    for person_id, meeting_id, title, date in db.execute(
+        select(Task.assignee_id, Meeting.meeting_id, Meeting.title, Meeting.date)
+        .join(Meeting, Meeting.meeting_id == Task.meeting_id)
+        .where(Meeting.user_id == user_id, Task.assignee_id.isnot(None))
+    ).all():
+        add(person_id, meeting_id, title, date)
+
+    out: dict[int, list[PersonMeetingOut]] = {}
+    for person_id, by_id in grouped.items():
+        items = list(by_id.values())
+        items.sort(key=lambda row: (row.date or "", row.meeting_id), reverse=True)
+        out[person_id] = items
+    return out
 
 
 def list_out_for_user(db: Session, user_id: int) -> list[PersonOut]:
     rows = list_for_user(db, user_id)
     indexes = _duplicate_indexes(rows)
-    return [to_out(row, duplicate_index=indexes.get(row.person_id)) for row in rows]
+    meetings = _meetings_by_person_id(db, user_id)
+    return [
+        to_out(
+            row,
+            duplicate_index=indexes.get(row.person_id),
+            meetings=meetings.get(row.person_id, []),
+        )
+        for row in rows
+    ]
 
 
 def get_for_user(db: Session, user_id: int, person_id: int) -> Person | None:
@@ -100,6 +143,11 @@ def create_person_flush(db: Session, *, user_id: int, name: str, note: str | Non
     db.add(person)
     db.flush()
     return person
+
+
+def delete_person(db: Session, person: Person) -> None:
+    db.delete(person)
+    db.commit()
 
 
 def meeting_people(db: Session, meeting_id: int) -> list[tuple[MeetingPerson, Person]]:

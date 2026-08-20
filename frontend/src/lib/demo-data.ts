@@ -260,6 +260,17 @@ export function dueTone(iso: string | null | undefined): DueTone {
   return "ok";
 }
 
+export function countDueAlerts(tasks: { due_date?: string | null }[]): { overdue: number; soon: number } {
+  let overdue = 0;
+  let soon = 0;
+  for (const task of tasks) {
+    const tone = dueTone(task.due_date);
+    if (tone === "overdue") overdue += 1;
+    else if (tone === "soon") soon += 1;
+  }
+  return { overdue, soon };
+}
+
 export function dueRemainingLabel(iso: string | null | undefined): string {
   const days = daysUntil(iso);
   if (days == null) return "";
