@@ -16,7 +16,9 @@ CREATE TABLE users (
     user_id  SERIAL PRIMARY KEY,
     name     VARCHAR(255) NOT NULL,
     email    VARCHAR(255) NOT NULL UNIQUE,
-    password VARCHAR(255) NOT NULL
+    password VARCHAR(255) NOT NULL,
+    password_reset_token VARCHAR(64),
+    password_reset_expires TIMESTAMPTZ
 );
 
 CREATE TABLE meetings (
@@ -32,6 +34,7 @@ CREATE TABLE meetings (
     description TEXT,
     analysis_error TEXT,
     speakers_matched BOOLEAN NOT NULL DEFAULT FALSE,
+    language   VARCHAR(8) NOT NULL DEFAULT 'tr',
     audio_path VARCHAR(1024)
 );
 

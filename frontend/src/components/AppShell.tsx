@@ -79,6 +79,14 @@ export function AppShell({
           </div>
           <div className="flex items-center gap-3">
             <ThemeToggle />
+            <Link
+              href="/settings"
+              className={`hidden text-xs sm:block ${
+                pathname.startsWith("/settings") ? "text-teal-200" : "text-slate-400 hover:text-teal-200"
+              }`}
+            >
+              Hesap
+            </Link>
             <button
               type="button"
               onClick={logout}
@@ -86,12 +94,17 @@ export function AppShell({
             >
               Çıkış
             </button>
-            <span
-              title={user.name}
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-teal-800 text-xs font-semibold text-teal-100"
+            <Link
+              href="/settings"
+              title="Hesap"
+              className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold ${
+                pathname.startsWith("/settings")
+                  ? "bg-teal-500 text-slate-950"
+                  : "bg-teal-800 text-teal-100 hover:bg-teal-700"
+              }`}
             >
               {initials(user.name)}
-            </span>
+            </Link>
           </div>
         </div>
         <nav className="relative flex gap-1 overflow-x-auto px-4 pb-2 sm:hidden">

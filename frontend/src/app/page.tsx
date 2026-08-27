@@ -4,10 +4,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { AgendaCalendar } from "@/components/AgendaCalendar";
 import { AppShell } from "@/components/AppShell";
-import { DueHint, MeetingBadge, DueAlertLine } from "@/components/StatusBadge";
+import { MeetingBadge, DueAlertLine } from "@/components/StatusBadge";
 import { fetchMeetings, fetchTasks, type Meeting, type Task } from "@/lib/api";
-import { byDueDate, countDueAlerts, dateOnly, dueTone, formatDay, formatDuration } from "@/lib/demo-data";
+import { countDueAlerts, formatDay, formatDuration } from "@/lib/demo-data";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -31,7 +32,6 @@ export default function DashboardPage() {
   const analyzed = meetings.filter((m) => m.status === "analyzed").length;
   const openTasks = tasks.filter((t) => t.status !== "done");
   const recent = meetings.slice(0, 4);
-  const upcoming = [...openTasks].sort(byDueDate).slice(0, 4);
   const rate = meetings.length ? Math.round((analyzed / meetings.length) * 1000) / 10 : 0;
   const alerts = countDueAlerts(openTasks);
 
@@ -99,7 +99,11 @@ export default function DashboardPage() {
         </article>
       </div>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[1.4fr_1fr]">
+      <div className="mt-6">
+        <AgendaCalendar meetings={meetings} tasks={openTasks} />
+      </div>
+
+      <div className="mt-6">
         <section className="min-w-0 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-teal-800/40 dark:bg-[#0f2220]">
           <div className="flex items-center justify-between px-5 py-4">
             <h2 className="font-semibold text-slate-900 dark:text-teal-50">Son toplantılar</h2>
@@ -144,48 +148,6 @@ export default function DashboardPage() {
               )}
             </tbody>
           </table>
-        </section>
-
-        <section className="min-w-0 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-teal-800/40 dark:bg-[#0f2220]">
-          <div className="flex items-center justify-between px-5 py-4">
-            <h2 className="font-semibold text-slate-900 dark:text-teal-50">Yaklaşan görevler</h2>
-            <Link href="/tasks?view=in_progress" className="text-sm font-medium text-slate-500 hover:text-slate-900 dark:hover:text-teal-200">
-              Tümünü gör
-            </Link>
-          </div>
-          <ul className="space-y-3 px-4 pb-4">
-            {upcoming.map((task) => {
-              const tone = dueTone(task.due_date);
-              return (
-                <li key={`${task.meeting_id}-${task.action_seq}`}>
-                  <Link
-                    href={`/tasks?task=${task.meeting_id}-${task.action_seq}`}
-                    className={`flex cursor-pointer gap-3 rounded-xl border p-4 shadow-sm transition-shadow ${
-                      tone === "overdue"
-                        ? "border-rose-400 bg-rose-50 hover:border-rose-500 hover:shadow-[0_0_18px_rgba(244,63,94,0.45)] dark:border-rose-700 dark:bg-rose-950/50"
-                        : tone === "soon"
-                          ? "border-amber-300 bg-amber-50 hover:border-amber-400 hover:shadow-[0_0_18px_rgba(245,158,11,0.5)] dark:border-amber-700/70 dark:bg-amber-950/40"
-                          : "border-sky-200 bg-sky-50 hover:border-sky-400 hover:shadow-[0_0_18px_rgba(14,165,233,0.5)] dark:border-sky-800/50 dark:bg-sky-950/40"
-                    }`}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="break-words text-base font-semibold text-slate-900 dark:text-teal-50">{task.title}</p>
-                      <p className="mt-1.5 text-sm font-semibold text-slate-700 dark:text-teal-100">
-                        {task.assignee?.trim() ? `Sorumlu: ${task.assignee}` : "Sorumlu yok"}
-                      </p>
-                      <p className="mt-2 truncate text-xs font-medium text-slate-500" title={`Toplantı: ${task.meeting_title}`}>
-                        Toplantı: {task.meeting_title}
-                      </p>
-                      <DueHint dueDate={dateOnly(task.due_date) || task.due_date} />
-                    </div>
-                  </Link>
-                </li>
-              );
-            })}
-            {!loading && upcoming.length === 0 && (
-              <li className="px-1 pb-2 text-sm text-slate-400">Açık görev yok.</li>
-            )}
-          </ul>
         </section>
       </div>
 

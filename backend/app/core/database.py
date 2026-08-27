@@ -62,6 +62,9 @@ def ensure_schema() -> None:
         ("meetings", "named_attendees", "TEXT"),
         ("meetings", "analysis_error", "TEXT"),
         ("meetings", "speakers_matched", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("meetings", "language", "VARCHAR(8) NOT NULL DEFAULT 'tr'"),
+        ("users", "password_reset_token", "VARCHAR(64)"),
+        ("users", "password_reset_expires", "TIMESTAMPTZ"),
     ]
     with engine.begin() as conn:
         conn.execute(text("SET lock_timeout = '2s'"))

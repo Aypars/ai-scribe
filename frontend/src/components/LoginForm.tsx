@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 import { getToken, loginUser, registerUser, setSession } from "@/lib/api";
 
@@ -129,6 +130,12 @@ export function LoginForm() {
             ? "Giriş yap"
             : "Hesap oluştur"}
       </button>
+      <Link
+        href="/login/forgot"
+        className="text-center text-sm font-semibold text-teal-700 hover:underline dark:text-teal-300"
+      >
+        Şifremi unuttum
+      </Link>
     </form>
   );
 }

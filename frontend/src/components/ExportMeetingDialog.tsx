@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 
 import type { ActionItem } from "@/lib/api";
+import { FormatPicker } from "@/components/FormatPicker";
+import type { ExportFormat } from "@/lib/export-office";
 import type { MeetingExportOptions, TranscriptMode } from "@/lib/export-meeting";
 
 type Props = {
@@ -15,17 +17,21 @@ type Props = {
 
 const transcriptChoices: { id: TranscriptMode; title: string; hint: string }[] = [
   { id: "include", title: "Rapora dahil et", hint: "Transkript tutanağın içinde yer alır." },
-  { id: "attach", title: "Ayrı ek", hint: "Transkript ayrı PDF ve metin dosyası olarak iner." },
+  { id: "attach", title: "Ayrı ek", hint: "Transkript ayrı dosya olarak iner." },
   { id: "omit", title: "Transkript olmasın", hint: "Tutanağa transkript eklenmez." },
 ];
 
 export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfirm }: Props) {
   const [transcript, setTranscript] = useState<TranscriptMode>("include");
+  const [format, setFormat] = useState<ExportFormat>("pdf");
   const [selected, setSelected] = useState<number[]>([]);
+  const [talkShare, setTalkShare] = useState(true);
 
   useEffect(() => {
     if (!open) return;
     setTranscript("include");
+    setFormat("pdf");
+    setTalkShare(true);
     setSelected(actions.map((item) => item.seq));
     // Snapshot at open; don't reset if the meeting poll refreshes the list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -62,9 +68,16 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
         onClick={(event) => event.stopPropagation()}
       >
         <h2 id="export-title" className="text-lg font-semibold text-slate-900 dark:text-teal-50">
-          PDF ayarları
+          Dışa aktar
         </h2>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Tutanağa nelerin gireceğini seç.</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Biçimi ve tutanağa nelerin gireceğini seç.</p>
+
+        <h3 className="mt-5 text-xs font-semibold tracking-[0.14em] text-teal-700 uppercase dark:text-teal-300">
+          Biçim
+        </h3>
+        <div className="mt-2">
+          <FormatPicker name="meeting-export-format" value={format} onChange={setFormat} />
+        </div>
 
         <h3 className="mt-5 text-xs font-semibold tracking-[0.14em] text-teal-700 uppercase dark:text-teal-300">
           Transkript
@@ -86,7 +99,11 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
                   name="transcript-mode"
                   className="mt-1 accent-teal-700"
                   checked={active}
-                  onChange={() => setTranscript(choice.id)}
+                  onChange={() => {
+                    setTranscript(choice.id);
+                    if (choice.id === "include") setTalkShare(true);
+                    else setTalkShare(false);
+                  }}
                 />
                 <span>
                   <span className="block text-sm font-medium text-slate-800 dark:text-teal-50">{choice.title}</span>
@@ -96,6 +113,23 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
             );
           })}
         </div>
+
+        {transcript === "include" ? (
+          <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 px-3 py-2.5 hover:bg-slate-50 dark:border-teal-800 dark:hover:bg-teal-950/40">
+            <input
+              type="checkbox"
+              className="mt-1 accent-teal-700"
+              checked={talkShare}
+              onChange={() => setTalkShare((prev) => !prev)}
+            />
+            <span>
+              <span className="block text-sm font-medium text-slate-800 dark:text-teal-50">Konuşma payı eklensin</span>
+              <span className="mt-0.5 block text-xs leading-5 text-slate-500 dark:text-slate-400">
+                Kim ne kadar konuştu, transkriptin hemen üstünde yer alır.
+              </span>
+            </span>
+          </label>
+        ) : null}
 
         <div className="mt-5 flex items-center justify-between gap-3">
           <h3 className="text-xs font-semibold tracking-[0.14em] text-teal-700 uppercase dark:text-teal-300">
@@ -153,13 +187,15 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
             disabled={exporting}
             onClick={() =>
               onConfirm({
+                format,
                 transcript,
                 actionSeqs: selected,
+                talkShare: transcript === "include" && talkShare,
               })
             }
             className="h-11 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
           >
-            {exporting ? "Hazırlanıyor…" : "PDF indir"}
+            {exporting ? "Hazırlanıyor…" : "Dışa aktar"}
           </button>
         </div>
       </div>

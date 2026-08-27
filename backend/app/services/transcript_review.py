@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.services.meeting_lang import current_lang
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +76,19 @@ Az sayıda, bariz olanlar. Şüphede boş bırak. original, satırdaki metnin bi
 Toplantı: {title}
 
 Transkript:
+{_transcript_text(lines)}
+"""
+    if current_lang.get() == "en":
+        prompt = f"""Do not rewrite the meeting transcript. Flag only very obvious issues.
+
+1) proper_name: If a proper name is in lowercase, fix casing only (jane doe → Jane Doe). No added or removed letters.
+2) warning: If a line is ASR nonsense (word salad, wrong language, broken syllables), flag it with a short suggestion. If unsure, leave it.
+
+Few items, only the obvious ones. When in doubt, leave empty. original must be an exact span of that line.
+
+Meeting: {title}
+
+Transcript:
 {_transcript_text(lines)}
 """
     client = genai.Client(api_key=api_key)

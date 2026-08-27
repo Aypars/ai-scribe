@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.core.config import settings
-from app.services.turkish import fix_sentence_i
+from app.services.meeting_lang import current_lang, maybe_fix_i, normalize_lang, speaker_prefix
 
 logger = logging.getLogger(__name__)
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
@@ -71,14 +71,14 @@ def _split_sentence_segments(raw_segments: list[dict]) -> list[TranscriptSegment
             idx = min(last + lead, max(len(ts_at) - 1, 0))
             timestamp = max(last_ts, int(ts_at[idx]) if ts_at else 0)
             last_ts = timestamp
-            sentences.append(TranscriptSegment(timestamp=timestamp, text=fix_sentence_i(text)))
+            sentences.append(TranscriptSegment(timestamp=timestamp, text=maybe_fix_i(text)))
         last = end
     tail = joined[last:].strip()
     if tail:
         lead = len(joined[last:]) - len(joined[last:].lstrip())
         idx = min(last + lead, max(len(ts_at) - 1, 0))
         timestamp = max(last_ts, int(ts_at[idx]) if ts_at else 0)
-        sentences.append(TranscriptSegment(timestamp=timestamp, text=fix_sentence_i(tail)))
+        sentences.append(TranscriptSegment(timestamp=timestamp, text=maybe_fix_i(tail)))
     return sentences
 
 _WINGET_FFMPEG = Path.home() / (
@@ -272,6 +272,48 @@ def _find_ffmpeg() -> Path | None:
     return _first_existing(extra)
 
 
+def extract_audio_from_video(video_path: Path) -> Path:
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        raise TranscriptionError("Video için ffmpeg gerekli. ffmpeg kurulu değil.")
+    dest = video_path.with_suffix(".m4a")
+    cmd = [
+        str(ffmpeg),
+        "-hide_banner",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30 * 60,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired as exc:
+        dest.unlink(missing_ok=True)
+        raise TranscriptionError("Videodan ses çıkarımı zaman aşımına uğradı") from exc
+    if completed.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
+        dest.unlink(missing_ok=True)
+        detail = (completed.stderr or completed.stdout or "").strip().lower()
+        if "does not contain any stream" in detail or "no audio" in detail:
+            raise TranscriptionError("Videoda ses kanalı yok")
+        raise TranscriptionError("Videodan ses çıkarılamadı")
+    return dest
+
+
 def _find_whisper() -> Path | None:
     if settings.whisper_bin:
         configured = Path(settings.whisper_bin)
@@ -329,8 +371,8 @@ def _speaker_label(raw: object) -> str | None:
     if match:
         index = int(match.group(1))
         if index < 26:
-            return f"Konuşmacı {chr(ord('A') + index)}"
-        return f"Konuşmacı {index + 1}"
+            return f"{speaker_prefix()} {chr(ord('A') + index)}"
+        return f"{speaker_prefix()} {index + 1}"
     return value
 
 
@@ -443,7 +485,7 @@ def _segments_from_whisperx(raw_segments: list[dict]) -> list[TranscriptSegment]
                 segments.append(
                     TranscriptSegment(
                         timestamp=max(0, int(stamp)),
-                        text=fix_sentence_i(sentence),
+                        text=maybe_fix_i(sentence),
                         speaker=speaker,
                     )
                 )
@@ -476,27 +518,26 @@ def _tool_env() -> dict[str, str]:
     return env
 
 
-def _whisper_language() -> str | None:
-    language = settings.whisper_language.strip().lower()
-    if language in {"auto", "detect"}:
-        return None
-    return language or "tr"
+def _whisper_language() -> str:
+    return current_lang.get()
 
 
 def _append_language_and_task(cmd: list[str]) -> None:
-    # transcribe = spoken language as-is. Without --language, Whisper often
-    # misdetects Turkish council audio as English and writes English anyway.
-    cmd.extend(["--task", "transcribe"])
-    language = _whisper_language()
-    if language:
-        cmd.extend(["--language", language])
+    # transcribe = spoken language as-is. --language tr on English audio
+    # makes Whisper rewrite the transcript into Turkish.
+    cmd.extend(["--task", "transcribe", "--language", _whisper_language()])
 
 
 def _asr_hints(names: list[str] | None) -> tuple[str, str]:
     clean = [name.strip() for name in (names or []) if name and name.strip()][:24]
-    prompt = "Türkçe resmi toplantı. Kabul edildi, oy birliği, sevk, buyurun."
-    if clean:
-        prompt += " Katılımcılar: " + ", ".join(clean) + "."
+    if current_lang.get() == "en":
+        prompt = "Formal English meeting. Motion carried, unanimously, action items, next steps."
+        if clean:
+            prompt += " Attendees: " + ", ".join(clean) + "."
+    else:
+        prompt = "Türkçe resmi toplantı. Kabul edildi, oy birliği, sevk, buyurun."
+        if clean:
+            prompt += " Katılımcılar: " + ", ".join(clean) + "."
     return prompt, ", ".join(clean)
 
 
@@ -617,6 +658,29 @@ def transcribe_audio(
     min_speakers: int | None = None,
     max_speakers: int | None = None,
     hint_names: list[str] | None = None,
+    language: str | None = None,
+) -> TranscriptResult:
+    token = current_lang.set(normalize_lang(language))
+    try:
+        return _transcribe_audio(
+            audio_path,
+            on_progress=on_progress,
+            meeting_id=meeting_id,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            hint_names=hint_names,
+        )
+    finally:
+        current_lang.reset(token)
+
+
+def _transcribe_audio(
+    audio_path: Path,
+    on_progress: Callable[[int, str], None] | None = None,
+    meeting_id: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    hint_names: list[str] | None = None,
 ) -> TranscriptResult:
     if _is_cancelled(meeting_id):
         raise TranscriptionCancelled("Yazıya çevirme iptal edildi")
@@ -710,7 +774,7 @@ def transcribe_audio(
 
     full_text = str(payload.get("text") or "").strip()
     if not segments and full_text:
-        segments = [TranscriptSegment(timestamp=0, text=fix_sentence_i(full_text))]
+        segments = [TranscriptSegment(timestamp=0, text=maybe_fix_i(full_text))]
 
     last_end = 0.0
     for item in raw_segments:

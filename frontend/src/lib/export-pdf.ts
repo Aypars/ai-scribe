@@ -25,13 +25,13 @@ let fontPack: { regular: string; bold: string } | null = null;
 let measureReady = false;
 let measureCanvas: CanvasRenderingContext2D | null = null;
 
-export function fileStem(title: string): string {
+export function fileStem(title: string, fallback = "tutanak"): string {
   const clean = title
     .replace(/[<>:"/\\|?*]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 80);
-  return clean || "tutanak";
+  return clean || fallback;
 }
 
 function toBase64(buffer: ArrayBuffer): string {
@@ -167,11 +167,12 @@ export function sectionHeading(
   title: string,
   color: [number, number, number] = TEAL,
   rule: [number, number, number] = RULE,
+  locale = "tr-TR",
 ): void {
   ensure(ctx, 18);
   ctx.y += 6;
   setType(ctx, "bold", 10, color);
-  ctx.doc.text(title.toLocaleUpperCase("tr-TR"), MARGIN, ctx.y);
+  ctx.doc.text(title.toLocaleUpperCase(locale), MARGIN, ctx.y);
   ctx.y += 2.6;
   ctx.doc.setDrawColor(...rule);
   ctx.doc.setLineWidth(0.35);

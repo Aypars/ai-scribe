@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.config import settings
 from app.models.transcript import Transcript
-from app.services.turkish import fix_sentence_i
+from app.services.meeting_lang import current_lang, maybe_fix_i, normalize_lang, speaker_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -25,38 +25,36 @@ _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 ANALYSIS_PROMPT = """Sen AI-SCRIBE için kıdemli bir toplantı raportörüsün. Transkripti baştan sona oku; atlama, sıkıştırarak yok etme.
 
-Kayıt her türlü toplantı olabilir: şirket, ekip, müşteri, okul, dernek, belediye, meclis veya başka bir görüşme. Türe varsayım yapma.
+Kaynak yalnızca transkript. Kullanıcı başlığı metadata; transkriptte geçmeyen hiçbir şeyi başlıktan olay, konu, süre veya karar yapma.
 
-JSON sırası: önce decisions, sonra actions, en son summary. Yalnızca özet yazıp listeleri boş bırakmak YASAK.
+JSON sırası: önce decisions, sonra actions, en son summary.
 
-Boş veya toplantı değilse (müzik, gürültü, şarkı sözü, sessizlik, anlamsız ses):
-- decisions: [].
-- actions: [].
-- summary: 1-2 cümle, kaydın toplantı olmadığını söyle.
-Uydurma karar, beyan, kapanış, gündem YASAK.
+Karar veya iş yoksa decisions ve actions boş kalır; özet yine üç bölümlü anlatılır. Yokken uydurma.
 
-Toplantıysa:
+Boş / anlamsız seste: decisions [], actions [], summary 1-2 cümle.
+
+Diyalog varsa:
 
 - decisions: Alınan HER karar. Sayı tavanı yok. Kabul, ret, oy birliği, sevk, atama, yetki, protokol, alım, gündem maddesi — ayrı madde.
   Aksiyon kararı silmez. Konuşulup bağlanan bir şey aksiyonda varsa kararda da olsun.
   “toplantı bitti / beyanla sona erdi” karar değildir. Tek cümle. source_seq_start / source_seq_end dar.
-  Meclis/kurul toplantısında en az birkaç karar vardır; boş dizi ancak gerçekten hiç karar yoksa.
+  Karar yoksa [].
 
-- actions: Yalnızca BU transkriptte yapılacak denmiş işler. Başka toplantıdaki aksiyonu kopyalama.
+- actions: Yalnızca BU transkriptte yapılacak denmiş işler. Başka kayıttan kopyalama.
   Sayı tavanı yok. Birleştirip kısa liste yapma.
   description: net iş.
   assignee: her zaman null. Sorumlu kişi eşleme. due_date: yalnız açık tarih. notes: 1 cümle veya "".
 
-- summary: Üç bölümlü resmi tutanak. Karar listesini kopyalama; müzakereyi anlat.
-  Çerçeve: 4–6 cümle. Kurul, tarih, katılanlar, gündem başlıkları.
-  Gündem akışı: maddeler sırayla, tekrar yok; tartışma + karar. Dilim yapıştırma.
-  Sonuç: 4–6 cümle. Takip ve kapanış; boş kapanış cümlesi yok.
+- summary: Üç bölümlü anlatım. Karar listesini kopyalama; duyulanı anlat.
+  Çerçeve: 4–6 cümle. Kim konuştu, kayıt ne üzerine, transkriptteki konular.
+  Gündem akışı: sırayla ne dendi; tartışma. Dilim yapıştırma.
+  Sonuç: 4–6 cümle. Transkriptteki kapanış / varılan nokta. Boş kapanış cümlesi yok.
   Uydurma yok. ISO tarih yok.
 
 Üslup:
-- Transkriptle aynı dil.
-- Konuşmacı adlarını transkriptteki güncel haliyle kullan (Ali Yılmaz veya Konuşmacı A).
-- Bu kayıt tek başına. Başlık benzer diye başka toplantıdaki kişi veya işi yazma.
+- Çıktı dili Türkçe. Özel isimler konuşulduğu gibi kalsın.
+- Konuşmacı adlarını transkriptteki haliyle kullan.
+- Bu kayıt tek başına. Başka kayıttaki kişi veya işi yazma.
 """
 
 CHUNK_PROMPT = """Bu transkript DİLİMİ. Her satırı oku. Uydurma yok. Yalnızca bu satırlar.
@@ -76,8 +74,7 @@ AKSİYON (toplantıdan SONRA kalacak iş):
 - Aynı işi tekrarlama. description net. notes biraz bağlam (1–2 cümle). assignee her zaman null. due_date yalnız açık tarih.
 
 section: Bu dilimin anlatımı. En az 3 paragraf, kısa tutma. Markdown yok, Çerçeve/Gündem/Sonuç başlığı yok.
-Her konu için: ne konuşuldu, kim ne önerdi veya itiraz etti, alternatifler, gerekçe, varılan nokta.
-Karar cümlesini tek başına yazıp geçme. Usul (mikrofon, ekran, yoklama) bir cümleyi geçmesin.
+Her konu için: ne konuşuldu, kim ne dedi. Karar yoksa karar icat etme. Transkriptte yoksa başlıktan konu alma.
 """
 
 REFINE_PROMPT = """Ham çıkarımı tutanak kalitesine çek. Yeni olay uydurma. Farklı gündem maddesini silme.
@@ -97,14 +94,106 @@ AKSİYONLAR:
 ÖZET:
 - Üç alan: summary_frame, summary_agenda, summary_close. Başlığı metnin içine yazma.
 - Üç bölüm de dolu olsun. Çerçeve ve Sonuç’u birer cümleye indirme. Gündem’e ham dilimleri alt alta yapıştırma.
-- Dilimler örtüşür; aynı konuyu (ör. yaya geçidi) iki kez yazma. Her madde tek paragraf.
+- Transkriptte geçmeyen başlık kelimelerini özete sokma.
+- Dilimler örtüşür; aynı konuyu iki kez yazma. Her madde tek paragraf.
 - Yoklama, ekrana yansıtma, mikrofon gibi usulü yazma.
 - ISO tarih yasak.
-- summary_frame: 4–6 cümle. Kurul, tarih, kim yönetti, kimler, gündemde neler var (madde adlarıyla).
-- summary_agenda: her gündem maddesi 4–7 cümle (talep, kim ne dedi, itiraz, gerekçe, karar, takip). Karar listesini kopyalama.
-- summary_close: 4–6 cümle. Ana sonuçların kısa bağlanması, takip işleri, kapanış. “Gündem maddeleri karara bağlanmıştır” gibi boş cümle YASAK.
+- summary_frame: 4–6 cümle. Kim konuştu, kayıt ne üzerine, transkriptteki konular.
+- summary_agenda: her konu 4–7 cümle (kim ne dedi, itiraz, varılan nokta). Karar listesini kopyalama.
+- summary_close: 4–6 cümle. Transkriptteki sonuç / kapanış. Boş kapanış cümlesi yazma.
 - Uydurma yok. Markdown yok.
 """
+
+ANALYSIS_PROMPT_EN = """You are a senior meeting rapporteur for AI-SCRIBE. Read the transcript start to finish; do not skip or compress events away.
+
+The transcript is the only source. The user title is metadata; do not turn anything from the title into an event, topic, deadline, or decision unless it was spoken.
+
+JSON order: decisions first, then actions, then summary.
+
+If there are no real decisions or tasks, leave those lists empty — still write a full three-part summary of what was heard. Do not invent.
+
+Empty/nonsense audio: decisions [], actions [], summary 1-2 sentences.
+
+If there is dialogue:
+
+- decisions: EVERY decision taken. No cap. Adopted, rejected, unanimous, referred, appointment, authority, protocol, purchase, agenda item — each as its own item.
+  An action does not replace a decision. If something was agreed and also appears as an action, keep it as a decision too.
+  “the meeting ended / closed with remarks” is not a decision. One sentence. Narrow source_seq_start / source_seq_end.
+  If none were taken, return [].
+
+- actions: Only work that this transcript says will be done. Do not copy actions from another recording.
+  No cap. Do not merge into a short list.
+  description: a concrete task.
+  assignee: always null. Do not assign owners. due_date: only an explicit date. notes: one sentence or "".
+
+- summary: A three-part narrative. Do not copy the decision list; narrate what was said.
+  Context: 4–6 sentences. Who spoke, what the recording is about, topics from the transcript.
+  Agenda: items in order; who said what. Do not paste chunks.
+  Outcome: 4–6 sentences. Where the transcript actually lands. No empty closing sentence.
+  No invention. No ISO timestamps.
+
+Style:
+- Output language: English. Every narrative field in English. Proper names stay as spoken.
+- Use speaker names as they appear in the transcript.
+- This recording stands alone. Do not pull people or tasks from another recording.
+"""
+
+CHUNK_PROMPT_EN = """This is a transcript CHUNK. Read every line. No invention. Only these lines.
+
+Write section, decisions, and actions in English.
+
+JSON: decisions, actions, section.
+
+DECISION (outcome, not procedure):
+- Write: adopted, rejected, referred, appointment, elected person, authority, protocol, purchase, grant, formal approval.
+- The RESULT of a vote/election is one decision (or one per winner). “Murat Yildiz was elected to the Climate Commission” is enough.
+- Do NOT write as separate decisions: put names on screen, start the vote, read nominees, roll call, microphone, break, “let’s draw lots”, every sentence of a “vote again” debate. If procedure is discussed, at most one sentence; the actual result is separate.
+- Different commission / different person / different agenda item stay SEPARATE. “the meeting ended” is not a decision.
+- One sentence. source_seq_start / source_seq_end only # numbers in this chunk.
+
+ACTION (work that remains AFTER the meeting):
+- Write: prepare a letter/approval, notify, payment, document, send to another body, report to a later meeting, follow-up.
+- Do NOT write: things done in the room now — holding a vote, putting names on screen, drawing lots, naming candidates, starting an election in this session. Those are not task cards.
+- Do not repeat the same job. description is concrete. notes give a bit of context (1–2 sentences). assignee always null. due_date only if an explicit date.
+
+section: Narrative of this chunk. At least 3 paragraphs, do not keep it short. No markdown, no Context/Agenda/Outcome headings.
+For each topic: what was said, who said it. Do not invent a decision if there was none. Do not take topics from the title if they are not in the transcript.
+"""
+
+REFINE_PROMPT_EN = """Raise the raw extraction to minute quality. Invent no new events. Do not drop a distinct agenda item.
+
+Write every summary field in English.
+
+DECISIONS:
+- Merge the steps of one election/vote. Write the result: who was elected, what was adopted/rejected/referred.
+- Bad example: separate items “a vote was held”, “it was a tie”, “draw lots”, “the MHP chair should draw”, “it was recorded”.
+- Good example: “Murat Yildiz was elected to the Climate Change and Environment Commission (lots after a tie).”
+- Different commissions and different winners stay SEPARATE decisions.
+- source_seq_start / source_seq_end come from the span of the merged raw items.
+
+ACTIONS:
+- Only work to be done after the meeting. Delete in-room voting, screen display, lots, reading nominees.
+- Merge the same follow-up into one item; keep notes a bit fuller (which unit, what will be requested).
+- assignee always null. Do not name an owner.
+
+SUMMARY:
+- Three fields: summary_frame, summary_agenda, summary_close. Do not write the heading inside the text.
+- All three must be filled. Do not shrink Context and Outcome to one sentence. Do not paste raw chunks into Agenda.
+- Do not put title-only wording into the summary if it was not spoken.
+- Chunks overlap; do not write the same topic twice. One paragraph per item.
+- Do not write procedure such as roll call, screen display, microphone.
+- ISO dates forbidden.
+- summary_frame: 4–6 sentences. Who spoke, what the recording is about from the transcript.
+- summary_agenda: each topic 4–7 sentences (who said what, pushback, where it landed). Do not copy the decision list.
+- summary_close: 4–6 sentences. The actual close in the transcript. Do not write an empty closing line.
+- No invention. No markdown.
+"""
+
+
+def _prompts() -> tuple[str, str, str]:
+    if current_lang.get() == "en":
+        return ANALYSIS_PROMPT_EN, CHUNK_PROMPT_EN, REFINE_PROMPT_EN
+    return ANALYSIS_PROMPT, CHUNK_PROMPT, REFINE_PROMPT
 
 
 
@@ -113,14 +202,14 @@ class AnalysisError(Exception):
 
 
 class DecisionDraft(BaseModel):
-    text: str = Field(description="Tek net karar cümlesi")
+    text: str = Field(description="One clear decision sentence")
     source_seq_start: int | None = Field(
         default=None,
-        description="Yalnızca bu karara ait ilk transkript satırının # numarası; alakasız satır alma",
+        description="First transcript line # for this decision only",
     )
     source_seq_end: int | None = Field(
         default=None,
-        description="Yalnızca bu karara ait son transkript satırının # numarası; aralığı dar tut",
+        description="Last transcript line # for this decision only; keep the span tight",
     )
 
     @model_validator(mode="before")
@@ -137,13 +226,13 @@ class DecisionDraft(BaseModel):
 
 
 class ActionDraft(BaseModel):
-    description: str = Field(description="Yapılacak somut iş; tek net cümle")
+    description: str = Field(description="Concrete task; one clear sentence")
     assignee: str | None = Field(
         default=None,
-        description="Her zaman null. Sorumlu kişi eşleme.",
+        description="Always null. Do not assign an owner.",
     )
-    due_date: str | None = Field(default=None, description="YYYY-MM-DD; açık tarih yoksa null")
-    notes: str = Field(default="", description="1-2 cümle bağlam")
+    due_date: str | None = Field(default=None, description="YYYY-MM-DD; null if no explicit date")
+    notes: str = Field(default="", description="1-2 sentences of context")
 
 
 def _coerce_decision_items(value: object) -> object:
@@ -172,12 +261,12 @@ def _coerce_action_items(value: object) -> object:
 
 class ChunkDraft(BaseModel):
     decisions: list[DecisionDraft] = Field(
-        description="Bu dilimdeki sonuç kararları. Oylama usulünün her adımı değil.",
+        description="Outcome decisions in this chunk. Not procedural steps.",
     )
     actions: list[ActionDraft] = Field(
-        description="Toplantıdan sonra kalacak işler. Salondaki oylama/yansıtma değil.",
+        description="Follow-up work after the recording. Not in-room procedure.",
     )
-    section: str = Field(description="Bu dilimin eksiksiz kısa anlatımı")
+    section: str = Field(description="Narrative of this chunk. At least 3 paragraphs. No markdown.")
 
     @field_validator("decisions", mode="before")
     @classmethod
@@ -192,26 +281,26 @@ class ChunkDraft(BaseModel):
 
 class RefineDraft(BaseModel):
     decisions: list[DecisionDraft] = Field(
-        description="Süzülmüş sonuç kararları. Usul adımı yok. Farklı gündemler ayrı.",
+        description="Filtered outcome decisions. No procedural steps. Distinct items stay separate.",
     )
     actions: list[ActionDraft] = Field(
-        description="Yalnızca toplantı sonrası işler. Salondaki oylama/yansıtma yok.",
+        description="Follow-up work after the recording. Not in-room procedure.",
     )
     summary_frame: str = Field(
         default="",
-        description="Çerçeve, 4–6 cümle. Kurul, tarih, katılanlar, gündem başlıkları. Tek cümle bırakma. Başlık yazma.",
+        description="Context, 4–6 sentences from the transcript. Do not write the heading.",
     )
     summary_agenda: str = Field(
         default="",
-        description="Gündem akışı. Dilimleri yapıştırma, tekrarları birleştir. Her madde 4–7 cümle. Başlık yazma.",
+        description="Agenda. Do not paste chunks. 4–7 sentences per topic. Do not write the heading.",
     )
     summary_close: str = Field(
         default="",
-        description="Sonuç, 4–6 cümle. Takip ve kapanış. Boş kapanış cümlesi yazma. Başlık yazma.",
+        description="Outcome, 4–6 sentences. Actual close in the transcript. Do not write the heading.",
     )
     summary: str = Field(
         default="",
-        description="Yedek. Üç alan dolduysa boş bırak.",
+        description="Fallback. Leave empty if the three fields are filled.",
     )
 
     @field_validator("decisions", mode="before")
@@ -228,14 +317,14 @@ class RefineDraft(BaseModel):
 class AnalysisDraft(BaseModel):
     decisions: list[DecisionDraft] = Field(
         default_factory=list,
-        description="Alınan, reddedilen veya sevk edilen her karar. Atlanmaz. Dar source_seq_start / source_seq_end.",
+        description="Every decision taken, rejected, or referred. Tight source_seq_start / source_seq_end.",
     )
     actions: list[ActionDraft] = Field(
         default_factory=list,
-        description="Yalnızca bu transkriptteki işler. Başka toplantıdan kopyalama. Tavan yok.",
+        description="Work from this transcript only. Do not copy from another recording.",
     )
     summary: str = Field(
-        description="Kapsamlı kurumsal toplantı raporu. Tek paragraf yasak. Gündem maddelerini sırayla anlatan birden fazla paragraf."
+        description="Three-part narrative. Do not collapse into one paragraph."
     )
 
     @field_validator("decisions", mode="before")
@@ -375,7 +464,7 @@ def _transcript_text(lines: list[Transcript]) -> str:
     chunks: list[str] = []
     for row in lines:
         stamp = _fmt_ts(row.timestamp)
-        speaker = row.speaker or "Konuşmacı"
+        speaker = row.speaker or speaker_prefix()
         chunks.append(f"[#{row.seq} {stamp}] {speaker}: {row.text.strip()}")
     return "\n".join(chunks)
 
@@ -453,6 +542,13 @@ def _merge_decisions(items: list[DecisionResult]) -> list[DecisionResult]:
     return kept
 
 
+def _title_meta(title: str) -> str:
+    text = re.sub(r"\s+", " ", (title or "").strip())
+    if not text:
+        return ""
+    return text[:180]
+
+
 def _assemble_summary(
     *,
     title: str,
@@ -474,28 +570,31 @@ def _summary_parts(
     sections: list[str],
 ) -> tuple[str, str, str]:
     when = _format_meeting_when(meeting_date)
-    title_text = (title or "").strip().rstrip(".")
     frame_bits: list[str] = []
-    if title_text and when:
-        frame_bits.append(f"{title_text}, {when} tarihinde olağan toplantısını yapmıştır.")
-    elif title_text:
-        frame_bits.append(f"{title_text} olağan toplantısını yapmıştır.")
-    elif when:
-        frame_bits.append(f"Toplantı {when} tarihinde yapılmıştır.")
     named = (attendees or "").strip()
-    if named:
-        frame_bits.append(f"Toplantıya {named} katılmıştır.")
-    frame_bits.append(
-        "Komisyon gündem maddelerini sırayla görüşmüş; talep, itiraz ve öneriler dinlendikten sonra karar almıştır."
-    )
+    if current_lang.get() == "en":
+        if when:
+            frame_bits.append(f"The recording is from {when}.")
+        if named:
+            frame_bits.append(f"{named} spoke.")
+        close = (
+            "The recording closes on the last points that were actually spoken. "
+            "Open questions in the dialogue stay open. "
+            "Nothing beyond this recording is added."
+        )
+    else:
+        if when:
+            frame_bits.append(f"Kayıt {when} tarihine aittir.")
+        if named:
+            frame_bits.append(f"Konuşanlar: {named}.")
+        close = (
+            "Kayıt, transkriptte geçen son noktalarla bağlanır. "
+            "Diyalogda açık kalan husus açık kalır. "
+            "Kayıtta olmayan gündem yazılmaz."
+        )
     body = [_strip_summary_labels(part) for part in sections]
     body = [part for part in body if part]
     agenda = "\n\n".join(body)
-    close = (
-        "Oturumda görüşülen her madde için komisyonun tutumu netleşmiş, itiraz edilen noktalar oylanarak bağlanmıştır. "
-        "Karara bağlanan işler ilgili birimlerin takibine bırakılmış; süre, tebligat ve yazışma takvimi konuşulmuştur. "
-        "Gündem dışı kalan kısa hususlar da kayda geçirilmiş ve toplantı bu çerçevede kapatılmıştır."
-    )
     return " ".join(frame_bits), agenda, close
 
 
@@ -504,27 +603,41 @@ def _join_report(frame: str, agenda: str, close: str) -> str:
     frame_text = _strip_summary_labels(_humanize_dates_in_text(frame))
     agenda_text = _strip_summary_labels(_humanize_dates_in_text(agenda))
     close_text = _strip_summary_labels(_humanize_dates_in_text(close))
+    if current_lang.get() == "en":
+        labels = ("Context", "Agenda", "Outcome")
+    else:
+        labels = ("Çerçeve", "Gündem akışı", "Sonuç")
     if frame_text:
-        blocks.extend(["Çerçeve", frame_text])
+        blocks.extend([labels[0], frame_text])
     if agenda_text:
-        blocks.extend(["Gündem akışı", agenda_text])
+        blocks.extend([labels[1], agenda_text])
     if close_text:
-        blocks.extend(["Sonuç", close_text])
-    return fix_sentence_i("\n\n".join(blocks).strip())
+        blocks.extend([labels[2], close_text])
+    return maybe_fix_i("\n\n".join(blocks).strip())
 
 
 def _summary_parts_from_draft(text: str) -> tuple[str, str, str]:
-    buckets = {"çerçeve": [], "gündem akışı": [], "sonuç": []}
+    buckets = {"frame": [], "agenda": [], "close": []}
+    heading = {
+        "çerçeve": "frame",
+        "context": "frame",
+        "gündem akışı": "agenda",
+        "gündem": "agenda",
+        "agenda": "agenda",
+        "sonuç": "close",
+        "outcome": "close",
+        "close": "close",
+    }
     current: str | None = None
     for line in (text or "").splitlines():
-        key = line.strip().casefold()
-        if key in buckets:
+        key = heading.get(line.strip().casefold())
+        if key:
             current = key
             continue
         if current:
             buckets[current].append(line)
     joined = {name: "\n".join(rows).strip() for name, rows in buckets.items()}
-    return joined["çerçeve"], joined["gündem akışı"], joined["sonuç"]
+    return joined["frame"], joined["agenda"], joined["close"]
 
 
 _MONTHS_TR = (
@@ -542,8 +655,23 @@ _MONTHS_TR = (
     "Kasım",
     "Aralık",
 )
+_MONTHS_EN = (
+    "",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 _SUMMARY_LABEL = re.compile(
-    r"^(çerçeve|gündem akışı|gündem|sonuç|katılımcılar|idari hususlar)\s*:?\s*$",
+    r"^(çerçeve|gündem akışı|gündem|sonuç|katılımcılar|idari hususlar|context|agenda|outcome|attendees)\s*:?\s*$",
     re.I,
 )
 _ISO_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?")
@@ -558,18 +686,22 @@ def _format_meeting_when(value: str | None) -> str | None:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         parsed = None
+    months = _MONTHS_EN if current_lang.get() == "en" else _MONTHS_TR
     if parsed is None and re.match(r"\d{4}-\d{2}-\d{2}", raw):
         try:
             day = date.fromisoformat(raw[:10])
-            return f"{day.day} {_MONTHS_TR[day.month]} {day.year}"
+            return f"{day.day} {months[day.month]} {day.year}"
         except ValueError:
             return raw
     if parsed is None:
         return raw
     local = parsed.astimezone() if parsed.tzinfo else parsed
-    text = f"{local.day} {_MONTHS_TR[local.month]} {local.year}"
+    text = f"{local.day} {months[local.month]} {local.year}"
     if local.hour or local.minute:
-        text += f" saat {local.hour:02d}.{local.minute:02d}"
+        if current_lang.get() == "en":
+            text += f" at {local.hour:02d}:{local.minute:02d}"
+        else:
+            text += f" saat {local.hour:02d}.{local.minute:02d}"
     return text
 
 
@@ -679,6 +811,56 @@ def _is_transient_gemini(text: str) -> bool:
 
 TModel = TypeVar("TModel", bound=BaseModel)
 
+_EN_FIELD_DESC = {
+    "text": "One clear decision sentence",
+    "source_seq_start": "First transcript line # for this decision only",
+    "source_seq_end": "Last transcript line # for this decision only; keep the span tight",
+    "description": "Concrete task; one clear sentence",
+    "assignee": "Always null. Do not assign an owner.",
+    "due_date": "YYYY-MM-DD; null if no explicit date",
+    "notes": "1-2 sentences of context",
+    "decisions": "Outcome decisions. Not procedural steps. Distinct items stay separate.",
+    "actions": "Follow-up work after the recording. Not in-room procedure.",
+    "section": "Narrative of this chunk. At least 3 paragraphs. No markdown.",
+    "summary_frame": "Context, 4–6 sentences from the transcript. Do not write the heading.",
+    "summary_agenda": "Agenda. Do not paste chunks. 4–7 sentences per topic. Do not write the heading.",
+    "summary_close": "Outcome, 4–6 sentences. Actual close in the transcript. Do not write the heading.",
+    "summary": "Fallback. Leave empty if the three fields are filled.",
+}
+
+
+def _output_lang_block() -> str:
+    if current_lang.get() == "en":
+        return (
+            "Output language: English. Write every string field in English "
+            "(section, summary_frame, summary_agenda, summary_close, decisions, actions, notes). "
+            "Proper names stay as spoken.\n\n"
+        )
+    return (
+        "Çıktı dili: Türkçe. Her metin alanını Türkçe yaz "
+        "(section, summary_frame, summary_agenda, summary_close, decisions, actions, notes). "
+        "Özel isimler konuşulduğu gibi kalsın.\n\n"
+    )
+
+
+def _json_schema(schema: type[BaseModel]) -> dict:
+    payload = json.loads(json.dumps(schema.model_json_schema()))
+    if current_lang.get() != "en":
+        return payload
+
+    def walk(obj: object, key: str | None) -> None:
+        if isinstance(obj, dict):
+            if key in _EN_FIELD_DESC and "description" in obj:
+                obj["description"] = _EN_FIELD_DESC[key]
+            for child_key, child in obj.items():
+                walk(child, child_key)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item, key)
+
+    walk(payload, None)
+    return payload
+
 
 def _parse_model(model: type[TModel], raw: str) -> TModel:
     try:
@@ -726,10 +908,11 @@ def _generate_json(
             try:
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=prompt,
+                    contents=_output_lang_block() + prompt,
                     config={
                         "response_mime_type": "application/json",
-                        "response_json_schema": schema.model_json_schema(),
+                        "response_json_schema": _json_schema(schema),
+                        "system_instruction": _output_lang_block().strip(),
                         "max_output_tokens": max_output_tokens,
                     },
                 )
@@ -774,8 +957,11 @@ def _generate_openai_json(
         response = client.chat.completions.create(
             model=_openai_model(),
             messages=[
-                {"role": "system", "content": "Sadece geçerli JSON yaz. Markdown yok."},
-                {"role": "user", "content": prompt},
+                {
+                    "role": "system",
+                    "content": _output_lang_block().strip() + " Return valid JSON only. No markdown.",
+                },
+                {"role": "user", "content": _output_lang_block() + prompt},
             ],
             response_format={"type": "json_object"},
             max_tokens=max_output_tokens,
@@ -817,7 +1003,7 @@ def _append_actions(
     allowed: dict[str, str],
 ) -> None:
     for item in items:
-        description_text = fix_sentence_i((item.description or "").strip())
+        description_text = maybe_fix_i((item.description or "").strip())
         key = " ".join(description_text.lower().split())
         if not description_text or key in seen:
             continue
@@ -827,28 +1013,15 @@ def _append_actions(
                 description=description_text,
                 assignee=None,
                 due_date=_parse_due(item.due_date),
-                notes=fix_sentence_i((item.notes or "").strip()),
+                notes=maybe_fix_i((item.notes or "").strip()),
             )
         )
-
-
-def _looks_like_non_meeting(summary: str) -> bool:
-    text = (summary or "").casefold()
-    return any(
-        needle in text
-        for needle in (
-            "toplantı değil",
-            "toplantı olmad",
-            "anlamsız ses",
-            "kayıt toplantı değil",
-        )
-    )
 
 
 def _collect_decisions(items: list[DecisionDraft], lines: list[Transcript]) -> list[DecisionResult]:
     decisions: list[DecisionResult] = []
     for item in items:
-        text = fix_sentence_i((item.text or "").strip())
+        text = maybe_fix_i((item.text or "").strip())
         if not text:
             continue
         start_seq, end_seq = match_decision_span(
@@ -889,6 +1062,10 @@ def _complete_json(
     return _generate_openai_json(prompt, schema, max_output_tokens=max_output_tokens)
 
 
+def _none_mark() -> str:
+    return "(none)" if current_lang.get() == "en" else "(yok)"
+
+
 def _format_raw_decisions(items: list[DecisionResult]) -> str:
     rows: list[str] = []
     for index, item in enumerate(items, start=1):
@@ -897,7 +1074,7 @@ def _format_raw_decisions(items: list[DecisionResult]) -> str:
             end = item.source_end_seq or item.source_seq
             span = f" [#{item.source_seq}–#{end}]"
         rows.append(f"{index}.{span} {item.text}")
-    return "\n".join(rows) if rows else "(yok)"
+    return "\n".join(rows) if rows else _none_mark()
 
 
 def _format_raw_actions(items: list[ActionResult]) -> str:
@@ -905,7 +1082,14 @@ def _format_raw_actions(items: list[ActionResult]) -> str:
     for index, item in enumerate(items, start=1):
         note = f" | {item.notes}" if item.notes else ""
         rows.append(f"{index}. {item.description}{note}")
-    return "\n".join(rows) if rows else "(yok)"
+    return "\n".join(rows) if rows else _none_mark()
+
+
+_TR_LETTERS = re.compile(r"[ğüşıöçĞÜŞİÖÇ]")
+
+
+def _looks_turkish(text: str) -> bool:
+    return len(_TR_LETTERS.findall(text or "")) >= 4
 
 
 def _refine_extracted(
@@ -925,15 +1109,27 @@ def _refine_extracted(
     if not decisions and not actions and not (draft_summary or "").strip():
         return decisions, actions, None
     if on_progress:
-        on_progress("Karar, görev ve özet süzülüyor…")
-    prompt = (
-        f"{REFINE_PROMPT}\n"
-        f"Toplantı: {title}\n"
-        f"Konuşmacı adları: {speakers}\n\n"
-        f"Ham kararlar:\n{_format_raw_decisions(decisions)}\n\n"
-        f"Ham aksiyonlar:\n{_format_raw_actions(actions)}\n\n"
-        f"Ham özet:\n{draft_summary.strip() or '(yok)'}\n"
-    )
+        on_progress("Karar, görev ve özet süzülüyor…" if current_lang.get() != "en" else "Filtering decisions, tasks and summary…")
+    _analysis_prompt, _chunk_prompt, refine_prompt = _prompts()
+    label = _title_meta(title)
+    if current_lang.get() == "en":
+        prompt = (
+            f"{refine_prompt}\n"
+            f"Title (metadata): {label or _none_mark()}\n"
+            f"Speaker names: {speakers}\n\n"
+            f"Raw decisions:\n{_format_raw_decisions(decisions)}\n\n"
+            f"Raw actions:\n{_format_raw_actions(actions)}\n\n"
+            f"Raw summary:\n{draft_summary.strip() or _none_mark()}\n"
+        )
+    else:
+        prompt = (
+            f"{refine_prompt}\n"
+            f"Başlık (metadata): {label or _none_mark()}\n"
+            f"Konuşmacı adları: {speakers}\n\n"
+            f"Ham kararlar:\n{_format_raw_decisions(decisions)}\n\n"
+            f"Ham aksiyonlar:\n{_format_raw_actions(actions)}\n\n"
+            f"Ham özet:\n{draft_summary.strip() or _none_mark()}\n"
+        )
     try:
         refined = _complete_json(
             prompt,
@@ -944,6 +1140,26 @@ def _refine_extracted(
             on_busy=on_busy,
             waits=(0, 6),
         )
+        if current_lang.get() == "en" and _looks_turkish(
+            " ".join(
+                (
+                    refined.summary_frame or "",
+                    refined.summary_agenda or "",
+                    refined.summary_close or "",
+                    refined.summary or "",
+                )
+            )
+        ):
+            logger.warning("Refine returned the wrong language; retrying in English")
+            refined = _complete_json(
+                "Write every string field in English. Do not write another language.\n" + prompt,
+                RefineDraft,
+                gemini_key=gemini_key,
+                openai_key=openai_key,
+                max_output_tokens=8192,
+                on_busy=on_busy,
+                waits=(0, 6),
+            )
     except AnalysisError:
         logger.exception("Refine pass failed; keeping chunk results")
         return decisions, actions, None
@@ -958,16 +1174,24 @@ def _refine_extracted(
     rf = (refined.summary_frame or "").strip()
     ra = (refined.summary_agenda or "").strip()
     rc = (refined.summary_close or "").strip()
-    if len(rf) < 160:
+    if current_lang.get() == "en":
+        if _looks_turkish(rf):
+            rf = frame if not _looks_turkish(frame) else rf
+        if _looks_turkish(ra):
+            ra = agenda if not _looks_turkish(agenda) else ra
+        if _looks_turkish(rc):
+            rc = close if not _looks_turkish(close) else rc
+    if len(rf) < 160 and not (current_lang.get() == "en" and _looks_turkish(frame)):
         rf = frame or rf
-    if len(ra) < 240:
+    if len(ra) < 240 and not (current_lang.get() == "en" and _looks_turkish(agenda)):
         ra = agenda or ra
-    if len(rc) < 160:
+    if len(rc) < 160 and not (current_lang.get() == "en" and _looks_turkish(close)):
         rc = close or rc
     polished = _join_report(rf, ra, rc)
-    if "Çerçeve" not in polished:
+    frame_heading = "Context" if current_lang.get() == "en" else "Çerçeve"
+    if frame_heading not in polished:
         leftover = _humanize_dates_in_text((refined.summary or "").strip())
-        polished = leftover if "Çerçeve" in leftover else None
+        polished = leftover if frame_heading in leftover else None
     logger.warning(
         "Refine pass decisions %s→%s actions %s→%s summary=%s",
         len(decisions),
@@ -980,6 +1204,34 @@ def _refine_extracted(
 
 
 def analyze_transcript(
+    lines: list[Transcript],
+    *,
+    title: str,
+    attendees: str | None,
+    meeting_date: str | None,
+    description: str | None = None,
+    named_attendees: str | None = None,
+    language: str | None = None,
+    on_busy: Callable[[int], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> AnalysisResult:
+    token = current_lang.set(normalize_lang(language))
+    try:
+        return _analyze_transcript(
+            lines,
+            title=title,
+            attendees=attendees,
+            meeting_date=meeting_date,
+            description=description,
+            named_attendees=named_attendees,
+            on_busy=on_busy,
+            on_progress=on_progress,
+        )
+    finally:
+        current_lang.reset(token)
+
+
+def _analyze_transcript(
     lines: list[Transcript],
     *,
     title: str,
@@ -1000,15 +1252,20 @@ def analyze_transcript(
     from app.services.speakers import parse_named_attendees
 
     labels = sorted(set(_speaker_labels(lines).values()))
-    speakers = ", ".join(labels) or "yok"
+    speakers = ", ".join(labels) or _none_mark()
     declared = parse_named_attendees(named_attendees)
     named = ", ".join(declared) if declared else (attendees or "")
-    extra = f"Açıklama: {description}\n" if description else ""
-    when = _format_meeting_when(meeting_date) or meeting_date or "belirtilmedi"
+    if current_lang.get() == "en":
+        extra = f"Description: {description}\n" if description else ""
+        when = _format_meeting_when(meeting_date) or meeting_date or "not specified"
+    else:
+        extra = f"Açıklama: {description}\n" if description else ""
+        when = _format_meeting_when(meeting_date) or meeting_date or "belirtilmedi"
     allowed = _speaker_labels(lines)
     slices = _iter_chunks(lines)
     total = len(slices)
     logger.warning("Analysis scanning %s lines in %s chunks", len(lines), total)
+    _analysis_prompt, chunk_prompt, _refine_prompt = _prompts()
 
     draft_decisions: list[DecisionResult] = []
     action_rows: list[ActionResult] = []
@@ -1020,15 +1277,27 @@ def analyze_transcript(
         if on_progress:
             on_progress(f"Satırlar taranıyor ({index}/{total})…")
         seqs = [row.seq for row in slice_lines]
-        prompt = (
-            f"{CHUNK_PROMPT}\n"
-            f"Toplantı: {title}\n"
-            f"Tarih: {when}\n"
-            f"Konuşmacı adları: {speakers}\n"
-            f"Bu dilim satır aralığı: #{seqs[0]}–#{seqs[-1]}\n"
-            f"{extra}"
-            f"Transkript dilimi:\n{_transcript_text(slice_lines)}\n"
-        )
+        label = _title_meta(title)
+        if current_lang.get() == "en":
+            prompt = (
+                f"{chunk_prompt}\n"
+                f"Title (metadata): {label or _none_mark()}\n"
+                f"Date: {when}\n"
+                f"Speaker names: {speakers}\n"
+                f"This chunk line range: #{seqs[0]}–#{seqs[-1]}\n"
+                f"{extra}"
+                f"Transcript chunk:\n{_transcript_text(slice_lines)}\n"
+            )
+        else:
+            prompt = (
+                f"{chunk_prompt}\n"
+                f"Başlık (metadata): {label or _none_mark()}\n"
+                f"Tarih: {when}\n"
+                f"Konuşmacı adları: {speakers}\n"
+                f"Bu dilim satır aralığı: #{seqs[0]}–#{seqs[-1]}\n"
+                f"{extra}"
+                f"Transkript dilimi:\n{_transcript_text(slice_lines)}\n"
+            )
         try:
             chunk = _complete_json(
                 prompt,
@@ -1039,6 +1308,17 @@ def analyze_transcript(
                 on_busy=on_busy,
                 waits=(0, 6),
             )
+            if current_lang.get() == "en" and _looks_turkish(chunk.section or ""):
+                logger.warning("Chunk %s/%s returned the wrong language; retrying in English", index, total)
+                chunk = _complete_json(
+                    "Write every string field in English. Do not write another language.\n" + prompt,
+                    ChunkDraft,
+                    gemini_key=gemini_key,
+                    openai_key=openai_key,
+                    max_output_tokens=8192,
+                    on_busy=on_busy,
+                    waits=(0, 6),
+                )
         except AnalysisError:
             failed += 1
             logger.exception("Chunk %s/%s failed", index, total)
@@ -1046,7 +1326,7 @@ def analyze_transcript(
         draft_decisions.extend(_collect_decisions(chunk.decisions, lines))
         _append_actions(chunk.actions, action_rows, seen_actions, allowed)
         if (chunk.section or "").strip():
-            sections.append(fix_sentence_i(chunk.section.strip()))
+            sections.append(maybe_fix_i(chunk.section.strip()))
 
     if failed == total:
         raise AnalysisError("Analiz dilimlerinin hiçbiri tamamlanamadı.")
@@ -1083,9 +1363,7 @@ def analyze_transcript(
         on_progress=on_progress,
     )
     if polished:
-        summary = fix_sentence_i(polished)
-    if _looks_like_non_meeting(summary) and not decisions and not actions:
-        summary = fix_sentence_i(sections[0] if sections else summary)
+        summary = maybe_fix_i(polished)
 
     logger.warning(
         "Chunked analysis lines=%s chunks=%s failed=%s summary_len=%s decisions=%s actions=%s",

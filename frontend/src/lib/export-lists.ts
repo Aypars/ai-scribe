@@ -1,6 +1,12 @@
 import type { Task } from "@/lib/api";
 import { byDueDate, countDueAlerts, dueRemainingLabel, dueTone, formatDay, formatDate } from "@/lib/demo-data";
 import {
+  type DocBlock,
+  type ExportFormat,
+  downloadDocx,
+  downloadMarkdown,
+} from "@/lib/export-office";
+import {
   AMBER,
   AMBER_RULE,
   CONTENT_W,
@@ -154,7 +160,130 @@ function writeOpenGroups(ctx: Ctx, tasks: Task[], showAssignee: boolean): void {
   }
 }
 
-export async function downloadPersonReport(person: PersonExportInput): Promise<void> {
+function statusLine(open: Task[], extra?: { people?: number }): string {
+  const alerts = countDueAlerts(open);
+  const parts = [
+    extra?.people != null ? `${extra.people} kişi` : null,
+    `${open.length} açık`,
+    alerts.overdue ? `${alerts.overdue} gecikmiş` : null,
+    alerts.soon ? `${alerts.soon} yaklaşan` : null,
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function taskBlocks(tasks: Task[], showAssignee: boolean, empty: string): DocBlock[] {
+  if (!tasks.length) return [{ kind: "p", text: empty }];
+  return tasks.map((task, index) => {
+    const extra = (task.description || task.notes || "").trim();
+    return {
+      kind: "item" as const,
+      n: index + 1,
+      text: task.title.trim() || "Görev",
+      meta: taskMeta(task, showAssignee),
+      extra: extra && extra !== task.title.trim() ? extra : undefined,
+    };
+  });
+}
+
+function openGroupBlocks(tasks: Task[], showAssignee: boolean): DocBlock[] {
+  const { overdue, soon, rest } = splitOpen(tasks);
+  if (!tasks.length) return [{ kind: "p", text: "Açık görev yok." }];
+  const blocks: DocBlock[] = [];
+  if (overdue.length) {
+    blocks.push({ kind: "h2", text: "Süresi geçen" });
+    blocks.push(...taskBlocks(overdue, showAssignee, ""));
+  }
+  if (soon.length) {
+    blocks.push({ kind: "h2", text: "Yaklaşan" });
+    blocks.push(...taskBlocks(soon, showAssignee, ""));
+  }
+  if (rest.length) {
+    blocks.push({ kind: "h2", text: overdue.length || soon.length ? "Diğer açık görevler" : "Açık görevler" });
+    blocks.push(...taskBlocks(rest, showAssignee, ""));
+  }
+  return blocks;
+}
+
+async function downloadBlocks(blocks: DocBlock[], format: ExportFormat, filename: string): Promise<void> {
+  if (format === "markdown") {
+    downloadMarkdown(blocks, `${filename}.md`);
+    return;
+  }
+  if (format === "docx") {
+    await downloadDocx(blocks, `${filename}.docx`);
+    return;
+  }
+}
+
+function personBlocks(person: PersonExportInput): DocBlock[] {
+  const open = [...person.open].sort(byDueDate);
+  const done = [...person.done].sort(byDueDate);
+  const blocks: DocBlock[] = [
+    { kind: "kicker", text: "Kişi raporu" },
+    { kind: "title", text: person.name },
+    { kind: "meta", text: todayLine() },
+  ];
+  if (person.note?.trim()) blocks.push({ kind: "meta", text: person.note.trim() });
+  blocks.push({ kind: "p", text: statusLine(open) });
+  blocks.push(...openGroupBlocks(open, false));
+  blocks.push({ kind: "h2", text: "Tamamlanan görevler" });
+  blocks.push(...taskBlocks(done, false, "Tamamlanan görev yok."));
+  if (person.meetings.length) {
+    blocks.push({ kind: "h2", text: "Toplantılar" });
+    person.meetings.forEach((meeting, index) => {
+      blocks.push({
+        kind: "item",
+        n: index + 1,
+        text: meeting.title,
+        meta: meeting.date ? formatDay(meeting.date) : "Tarih yok",
+      });
+    });
+  }
+  return blocks;
+}
+
+function rosterBlocks(rows: PeopleRosterRow[]): DocBlock[] {
+  const withOpen = rows.filter((row) => row.open.length > 0);
+  const openTasks = withOpen.flatMap((row) => row.open);
+  const blocks: DocBlock[] = [
+    { kind: "kicker", text: "Kişiler raporu" },
+    { kind: "title", text: "Kişiler ve açık görevler" },
+    { kind: "meta", text: todayLine() },
+    { kind: "p", text: statusLine(openTasks, { people: withOpen.length }) },
+  ];
+  if (!withOpen.length) {
+    blocks.push({ kind: "p", text: "Listede açık görev yok." });
+    return blocks;
+  }
+  for (const row of withOpen) {
+    blocks.push({ kind: "h2", text: row.name });
+    if (row.note?.trim()) blocks.push({ kind: "p", text: row.note.trim() });
+    blocks.push({ kind: "p", text: statusLine(row.open) });
+    blocks.push(...taskBlocks([...row.open].sort(byDueDate), false, "Açık görev yok."));
+  }
+  return blocks;
+}
+
+function openTasksBlocks(input: OpenTasksExportInput): DocBlock[] {
+  const tasks = [...input.tasks].sort(byDueDate);
+  const title = input.title?.trim() || "Açık görevler";
+  const blocks: DocBlock[] = [
+    { kind: "kicker", text: "Görev raporu" },
+    { kind: "title", text: title },
+    { kind: "meta", text: todayLine() },
+  ];
+  if (input.subtitle?.trim()) blocks.push({ kind: "meta", text: input.subtitle.trim() });
+  blocks.push({ kind: "p", text: statusLine(tasks) });
+  blocks.push(...openGroupBlocks(tasks, input.showAssignee !== false));
+  return blocks;
+}
+
+export async function downloadPersonReport(person: PersonExportInput, format: ExportFormat = "pdf"): Promise<void> {
+  const stem = `${fileStem(person.name)} Görevler Rapor`;
+  if (format !== "pdf") {
+    await downloadBlocks(personBlocks(person), format, stem);
+    return;
+  }
   await readyMeasure();
   const { doc, ctx } = await newDocument();
   const open = [...person.open].sort(byDueDate);
@@ -181,10 +310,15 @@ export async function downloadPersonReport(person: PersonExportInput): Promise<v
     });
   }
   writeFooters(doc);
-  triggerDownload(new Uint8Array(doc.output("arraybuffer")), `${fileStem(person.name)} Görevler Rapor.pdf`);
+  triggerDownload(new Uint8Array(doc.output("arraybuffer")), `${stem}.pdf`);
 }
 
-export async function downloadPeopleRoster(rows: PeopleRosterRow[]): Promise<void> {
+export async function downloadPeopleRoster(rows: PeopleRosterRow[], format: ExportFormat = "pdf"): Promise<void> {
+  const stem = "Kişiler Açık Görevler Rapor";
+  if (format !== "pdf") {
+    await downloadBlocks(rosterBlocks(rows), format, stem);
+    return;
+  }
   await readyMeasure();
   const { doc, ctx } = await newDocument();
   const withOpen = rows.filter((row) => row.open.length > 0);
@@ -209,17 +343,22 @@ export async function downloadPeopleRoster(rows: PeopleRosterRow[]): Promise<voi
     }
   }
   writeFooters(doc);
-  triggerDownload(new Uint8Array(doc.output("arraybuffer")), "Kişiler Açık Görevler Rapor.pdf");
+  triggerDownload(new Uint8Array(doc.output("arraybuffer")), `${stem}.pdf`);
 }
 
-export async function downloadOpenTasksReport(input: OpenTasksExportInput): Promise<void> {
+export async function downloadOpenTasksReport(input: OpenTasksExportInput, format: ExportFormat = "pdf"): Promise<void> {
+  const title = input.title?.trim() || "Açık görevler";
+  const stem = `${fileStem(title)} Rapor`;
+  if (format !== "pdf") {
+    await downloadBlocks(openTasksBlocks(input), format, stem);
+    return;
+  }
   await readyMeasure();
   const { doc, ctx } = await newDocument();
   const tasks = [...input.tasks].sort(byDueDate);
-  const title = input.title?.trim() || "Açık görevler";
   writeCover(ctx, "GÖREV RAPORU", title, [todayLine(), input.subtitle?.trim() || ""]);
   writeStatusLine(ctx, tasks);
   writeOpenGroups(ctx, tasks, input.showAssignee !== false);
   writeFooters(doc);
-  triggerDownload(new Uint8Array(doc.output("arraybuffer")), `${fileStem(title)} Rapor.pdf`);
+  triggerDownload(new Uint8Array(doc.output("arraybuffer")), `${stem}.pdf`);
 }

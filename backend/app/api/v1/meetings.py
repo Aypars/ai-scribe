@@ -27,17 +27,21 @@ from app.schemas.meeting import (
     TranscriptionProgressOut,
 )
 from app.services.analysis import AnalysisError, analyze_transcript, match_decision_span, _is_transient_gemini
+from app.services.meeting_lang import current_lang, normalize_lang
 from app.services.storage import (
     AUDIO_MEDIA_TYPES,
     StorageError,
     absolute_audio_path,
     delete_audio,
+    is_video_file,
     save_audio,
+    stored_relative_path,
 )
 from app.services.transcription import (
     TranscriptionCancelled,
     cancel_transcription,
     clear_transcription,
+    extract_audio_from_video,
     fail_job,
     finish_job,
     get_job,
@@ -156,6 +160,7 @@ def _detail_out(db: Session, meeting: Meeting) -> MeetingDetailOut:
         end_line = by_seq.get(end_seq) if end_seq is not None else start_line
         decision_out.append(
             DecisionOut(
+                seq=None if isinstance(row, str) else row.seq,
                 text=text,
                 source_seq=start_line.seq if start_line else None,
                 source_end_seq=end_line.seq if end_line else None,
@@ -174,6 +179,7 @@ def _detail_out(db: Session, meeting: Meeting) -> MeetingDetailOut:
         attendees=meetings_repo.display_attendees(meeting, meeting.transcripts),
         named_attendees=meeting.named_attendees,
         description=meeting.description,
+        language=getattr(meeting, "language", None) or "tr",
         audio_path=meeting.audio_path,
         transcript=[
             TranscriptLineOut(
@@ -210,11 +216,13 @@ def transcribe_meeting_job(meeting_id: int) -> None:
     path = None
     db = SessionLocal()
     named_attendees = None
+    language = "tr"
     try:
         meeting = db.get(Meeting, meeting_id)
         if meeting is not None and meeting.audio_path:
             path = absolute_audio_path(meeting.audio_path)
             named_attendees = meeting.named_attendees
+            language = getattr(meeting, "language", None) or "tr"
         else:
             fail_job(meeting_id, "Toplantı veya ses dosyası bulunamadı")
     finally:
@@ -226,7 +234,25 @@ def transcribe_meeting_job(meeting_id: int) -> None:
         return
 
     db = None
+    lang_token = current_lang.set(normalize_lang(language))
     try:
+        if is_video_file(path):
+            update_job(meeting_id, progress=3, message="Videodan ses çıkarılıyor…")
+            source = path
+            path = extract_audio_from_video(source)
+            db = SessionLocal()
+            try:
+                meeting = db.get(Meeting, meeting_id)
+                if meeting is not None:
+                    meeting.audio_path = stored_relative_path(path)
+                    db.commit()
+            finally:
+                db.close()
+                db = None
+            try:
+                source.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Video silinemedi: %s", source)
         logger.warning("Whisper job started for meeting %s (%s)", meeting_id, path)
         from app.services.speakers import parse_named_attendees
 
@@ -241,6 +267,7 @@ def transcribe_meeting_job(meeting_id: int) -> None:
             min_speakers=2,
             max_speakers=max(8, named_count + 4) if named_count else 12,
             hint_names=names,
+            language=language,
         )
         db = SessionLocal()
         meeting = db.get(Meeting, meeting_id)
@@ -267,6 +294,7 @@ def transcribe_meeting_job(meeting_id: int) -> None:
         if meeting is not None:
             meetings_repo.mark_failed(db, meeting)
     finally:
+        current_lang.reset(lang_token)
         clear_transcription(meeting_id)
         if db is not None:
             db.close()
@@ -312,6 +340,7 @@ def _run_analysis(db: Session, meeting: Meeting) -> None:
     named_attendees = meeting.named_attendees
     meeting_date = meeting.date.isoformat() if meeting.date else None
     description = meeting.description
+    language = getattr(meeting, "language", None)
     meeting_id = meeting.meeting_id
     user_id = meeting.user_id
     db.commit()
@@ -323,6 +352,7 @@ def _run_analysis(db: Session, meeting: Meeting) -> None:
             meeting_date=meeting_date,
             description=description,
             named_attendees=named_attendees,
+            language=language,
             on_busy=lambda wait: _analysis_message.__setitem__(
                 meeting_id, f"Gemini yoğun, {wait} sn sonra tekrar…"
             ),
@@ -357,6 +387,7 @@ def _run_speaker_match(db: Session, meeting: Meeting) -> None:
         return
     meeting_id = meeting.meeting_id
     user_id = meeting.user_id
+    token = current_lang.set(normalize_lang(getattr(meeting, "language", None)))
     _matching.add(meeting_id)
     _matching_message[meeting_id] = "Konuşmacılar eşleniyor…"
     update_job(meeting_id, progress=85, message="Konuşmacılar eşleniyor…")
@@ -386,6 +417,7 @@ def _run_speaker_match(db: Session, meeting: Meeting) -> None:
             meeting.speakers_matched = True
             db.commit()
     finally:
+        current_lang.reset(token)
         _matching.discard(meeting_id)
         _matching_message.pop(meeting_id, None)
 
@@ -501,6 +533,7 @@ async def create_meeting(
     date: str = Form(...),
     attendees: str = Form(""),
     description: str = Form(""),
+    language: str = Form("tr"),
     audio: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -508,7 +541,7 @@ async def create_meeting(
     filename = audio.filename or ""
     data = await audio.read()
     if not data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ses dosyası boş")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dosya boş")
 
     try:
         audio_path = save_audio(current_user.user_id, filename, data)
@@ -524,6 +557,7 @@ async def create_meeting(
         attendees=named,
         named_attendees=named,
         description=description.strip() or None,
+        language=language,
         audio_path=audio_path,
     )
     schedule_transcription(meeting.meeting_id)
@@ -717,6 +751,20 @@ def update_meeting(
         )
         if updated is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aksiyon bulunamadı")
+    if "summary" in body.model_fields_set and body.summary is not None:
+        meetings_repo.update_summary(db, meeting, body.summary)
+    if body.update_decision is not None:
+        text = body.update_decision.text.strip()
+        if not text:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Karar boş olamaz")
+        updated_decision = meetings_repo.update_decision(
+            db,
+            meeting,
+            body.update_decision.seq,
+            text,
+        )
+        if updated_decision is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Karar bulunamadı")
     if body.analyze:
         if meeting.status not in {"transcribed", "analyzed"}:
             raise HTTPException(

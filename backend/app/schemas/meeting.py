@@ -7,6 +7,7 @@ from app.schemas.person import PersonOut
 
 
 class DecisionOut(BaseModel):
+    seq: int | None = None
     text: str
     source_seq: int | None = None
     source_end_seq: int | None = None
@@ -33,6 +34,7 @@ class MeetingOut(BaseModel):
     attendees: str | None
     named_attendees: str | None = None
     description: str | None = None
+    language: str = "tr"
     audio_path: str | None
 
 
@@ -89,6 +91,11 @@ class TranscriptEditIn(BaseModel):
     flags: list[TranscriptFlagOut] | None = None
 
 
+class DecisionPatchIn(BaseModel):
+    seq: int
+    text: str = Field(..., min_length=1, max_length=4000)
+
+
 class MeetingUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     date: str | None = None
@@ -99,6 +106,8 @@ class MeetingUpdate(BaseModel):
     dismiss_action: int | None = None
     update_action: ActionPatchIn | None = None
     update_transcript: TranscriptEditIn | None = None
+    update_decision: DecisionPatchIn | None = None
+    summary: str | None = Field(default=None, max_length=20000)
 
 
 class SpeakerRenameIn(BaseModel):

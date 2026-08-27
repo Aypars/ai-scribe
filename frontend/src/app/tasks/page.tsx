@@ -25,7 +25,9 @@ import { PersonPicker, splitAttendeeNames } from "@/components/PersonPicker";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { byDueDate, countDueAlerts, dateOnly, dueTone, todayISO } from "@/lib/demo-data";
+import { ExportFormatDialog } from "@/components/FormatPicker";
 import { downloadOpenTasksReport } from "@/lib/export-lists";
+import type { ExportFormat } from "@/lib/export-office";
 
 const columns: { id: TaskStatus; title: string; titleClass: string; check: string }[] = [
   {
@@ -87,6 +89,7 @@ export default function TasksPage() {
   const [boardView, setBoardView] = useState<"suggestions" | TaskStatus>("suggestions");
   const [boardLayout, setBoardLayout] = useState<"focus" | "board">("focus");
   const [exporting, setExporting] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -403,7 +406,7 @@ export default function TasksPage() {
 
   const filterActive = meetingFilter !== "all" || personFilter !== "all" || query.trim().length > 0;
 
-  async function exportOpenTasks() {
+  async function exportOpenTasks(format: ExportFormat) {
     if (exporting) return;
     setExporting(true);
     try {
@@ -429,10 +432,11 @@ export default function TasksPage() {
         subtitle,
         tasks: grouped.in_progress,
         showAssignee: personFilter === "all",
-      });
-      toast("PDF indirildi");
+      }, format);
+      setExportOpen(false);
+      toast("Dışa aktarıldı");
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "PDF hazırlanamadı");
+      toast(err instanceof Error ? err.message : "Dışa aktarılamadı");
     } finally {
       setExporting(false);
     }
@@ -446,10 +450,10 @@ export default function TasksPage() {
           <button
             type="button"
             disabled={exporting}
-            onClick={() => void exportOpenTasks()}
+            onClick={() => setExportOpen(true)}
             className="h-10 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-slate-200 dark:hover:bg-teal-900/40"
           >
-            {exporting ? "Hazırlanıyor…" : "PDF indir"}
+            {exporting ? "Hazırlanıyor…" : "Dışa aktar"}
           </button>
           <button
             type="button"
@@ -1090,6 +1094,14 @@ export default function TasksPage() {
           </aside>
         </div>
       )}
+      <ExportFormatDialog
+        open={exportOpen}
+        exporting={exporting}
+        onClose={() => {
+          if (!exporting) setExportOpen(false);
+        }}
+        onConfirm={(format) => void exportOpenTasks(format)}
+      />
     </AppShell>
   );
 }

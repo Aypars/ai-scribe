@@ -4,10 +4,15 @@ from uuid import uuid4
 from app.core.config import settings
 
 ALLOWED_AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a"}
+ALLOWED_VIDEO_SUFFIXES = {".mp4", ".webm", ".mov"}
+ALLOWED_MEDIA_SUFFIXES = ALLOWED_AUDIO_SUFFIXES | ALLOWED_VIDEO_SUFFIXES
 AUDIO_MEDIA_TYPES = {
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".m4a": "audio/mp4",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
 }
 
 
@@ -23,10 +28,21 @@ def _upload_root() -> Path:
     return root
 
 
+def is_video_file(path: Path) -> bool:
+    return path.suffix.lower() in ALLOWED_VIDEO_SUFFIXES
+
+
+def stored_relative_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(_upload_root().resolve()).as_posix()
+    except ValueError:
+        return f"{path.parent.name}/{path.name}"
+
+
 def save_audio(user_id: int, filename: str, data: bytes) -> str:
     suffix = Path(filename).suffix.lower()
-    if suffix not in ALLOWED_AUDIO_SUFFIXES:
-        raise StorageError("Sadece MP3, WAV veya M4A yükleyebilirsiniz")
+    if suffix not in ALLOWED_MEDIA_SUFFIXES:
+        raise StorageError("Sadece MP3, WAV, M4A, MP4, WEBM veya MOV yükleyebilirsiniz")
     if len(data) > settings.max_upload_bytes:
         limit_mb = settings.max_upload_bytes // (1024 * 1024)
         raise StorageError(f"Dosya {limit_mb} MB sınırını aşıyor")

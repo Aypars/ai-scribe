@@ -20,6 +20,7 @@ class Meeting(Base):
     description: Mapped[str | None] = mapped_column(Text)
     analysis_error: Mapped[str | None] = mapped_column(Text)
     speakers_matched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="tr")
     audio_path: Mapped[str | None] = mapped_column(String(1024))
 
     transcripts: Mapped[list["Transcript"]] = relationship(

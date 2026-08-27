@@ -157,8 +157,11 @@ def create_meeting(
     named_attendees: str | None = None,
     description: str | None,
     audio_path: str,
+    language: str = "tr",
 ) -> Meeting:
     named = (named_attendees if named_attendees is not None else attendees) or None
+    from app.services.meeting_lang import normalize_lang
+
     meeting = Meeting(
         user_id=user_id,
         title=title,
@@ -167,6 +170,7 @@ def create_meeting(
         attendees=attendees,
         named_attendees=named,
         description=description,
+        language=normalize_lang(language),
         audio_path=audio_path,
     )
     db.add(meeting)
@@ -297,6 +301,8 @@ def apply_speaker_map(db: Session, meeting: Meeting, mapping: dict[str, str] | N
 
 
 def fix_transcript_sentence_i(db: Session, meeting: Meeting) -> Meeting:
+    if getattr(meeting, "language", "tr") == "en":
+        return meeting
     from app.services.turkish import fix_sentence_i
 
     changed = False
@@ -383,9 +389,9 @@ def apply_transcript_review(db: Session, meeting: Meeting, items: list) -> Meeti
         if item.kind == "proper_name" or is_case_only(original, suggestion):
             updated = replace_ci(row.text, original, suggestion)
             if updated is not None:
-                from app.services.turkish import fix_sentence_i
+                from app.services.meeting_lang import maybe_fix_i
 
-                row.text = fix_sentence_i(updated)
+                row.text = maybe_fix_i(updated, getattr(meeting, "language", None))
             continue
         flags = parse_flags(row.flags)
         if any(flag["original"] == original for flag in flags):
@@ -552,3 +558,25 @@ def update_action(
     db.commit()
     db.refresh(action)
     return action
+
+
+def update_summary(db: Session, meeting: Meeting, summary: str) -> None:
+    text = summary.strip()
+    analysis = db.get(Analysis, meeting.meeting_id)
+    if analysis is None:
+        if not text:
+            return
+        db.add(Analysis(meeting_id=meeting.meeting_id, summary=text))
+    else:
+        analysis.summary = text
+    db.commit()
+
+
+def update_decision(db: Session, meeting: Meeting, seq: int, text: str) -> Decision | None:
+    row = db.get(Decision, (meeting.meeting_id, seq))
+    if row is None:
+        return None
+    row.text = text.strip()
+    db.commit()
+    db.refresh(row)
+    return row

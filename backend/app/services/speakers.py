@@ -8,18 +8,25 @@ import re
 
 from pydantic import BaseModel, Field
 
+from app.services.meeting_lang import current_lang
 from app.services.turkish import lower_tr, title_word
 
 logger = logging.getLogger(__name__)
 
-GENERIC_LABEL = re.compile(r"^Konuşmacı\s+[A-Z0-9]+$", re.I)
-_STRIP_PREFIX = re.compile(r"^sayın\s+", re.I)
+GENERIC_LABEL = re.compile(r"^(?:Konuşmacı|Speaker)\s+[A-Z0-9]+$", re.I)
+_STRIP_PREFIX = re.compile(r"^(?:sayın|mr\.?|ms\.?|mrs\.?|mx\.?)\s+", re.I)
 _SPLIT_NAMES = re.compile(r"[,;\n]+")
 
 
+def _title_person(word: str) -> str:
+    if current_lang.get() == "en":
+        return word[:1].upper() + word[1:] if word else word
+    return title_word(word)
+
+
 class SpeakerGuess(BaseModel):
-    label: str = Field(description="Konuşmacı A gibi diarization etiketi")
-    name: str = Field(description="Kullanıcının verdiği listedeki kişi adı")
+    label: str = Field(description="Diarization label such as Speaker A")
+    name: str = Field(description="Person name from the user-provided list")
 
 
 class SpeakerGuessList(BaseModel):
@@ -45,7 +52,7 @@ def speaker_name(raw: str | None) -> str | None:
     text = _STRIP_PREFIX.sub("", text).strip()
     if not text or is_generic_label(text):
         return None
-    words = [title_word(part) for part in text.split() if part]
+    words = [_title_person(part) for part in text.split() if part]
     return " ".join(words) or None
 
 
@@ -85,11 +92,12 @@ def _match_label(raw: str, allowed: dict[str, str]) -> str | None:
     if hit:
         return hit
     short = text.rsplit(maxsplit=1)[-1]
-    return allowed.get(f"konuşmacı {short}".casefold())
+    return allowed.get(f"konuşmacı {short}".casefold()) or allowed.get(f"speaker {short}".casefold())
 
 
 _INVITE = re.compile(
-    r"\b(buyur(?:un|unuz|urum)?|söz\s+(?:sizde|sizin|onun)|mikrofon(?:u|unu)?\s+(?:ver|al)|söz\s+ver)\b",
+    r"\b(buyur(?:un|unuz|urum)?|söz\s+(?:sizde|sizin|onun)|mikrofon(?:u|unu)?\s+(?:ver|al)|söz\s+ver|"
+    r"go\s+ahead|the\s+floor\s+is\s+yours|over\s+to\s+you)\b",
     re.I,
 )
 
@@ -178,7 +186,7 @@ def filter_speaker_mappings(
 
 def _transcript_for_names(lines: list) -> str:
     return "\n".join(
-        f"[#{row.seq}] {row.speaker or 'Konuşmacı'}: {(row.text or '').strip()}"
+        f"[#{row.seq}] {row.speaker or ('Speaker' if current_lang.get() == 'en' else 'Konuşmacı')}: {(row.text or '').strip()}"
         for row in lines
         if (row.text or "").strip()
     )
@@ -199,7 +207,27 @@ def resolve_speaker_map(lines: list, *, title: str = "", names: list[str] | None
 
     from google import genai
 
-    prompt = f"""Konuşmacı A/B/C etiketlerini yalnızca kullanıcının verdiği isimlerle eşle.
+    if current_lang.get() == "en":
+        prompt = f"""Map Speaker A/B/C labels only to names the user provided.
+
+Attendee list (do not invent names outside this list): {", ".join(mentioned)}
+
+Rules:
+- name must be one of the names on this list. Do not invent a person.
+- If that name is not clearly in the transcript, do not map them.
+- The person who SAYS "please, Jane / the floor is yours, Jane" is not that name; they are the chair inviting them.
+- The DIFFERENT label that starts speaking right after the invite is that person.
+- If someone introduces themselves with a list name, that is them.
+- If there is no evidence, drop that label. No guessing.
+
+Meeting: {title}
+Labels: {", ".join(labels)}
+
+Transcript:
+{_transcript_for_names(lines)}
+"""
+    else:
+        prompt = f"""Konuşmacı A/B/C etiketlerini yalnızca kullanıcının verdiği isimlerle eşle.
 
 Katılımcı listesi (bunların DIŞINDA isim yazma): {", ".join(mentioned)}
 

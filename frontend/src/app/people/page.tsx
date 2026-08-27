@@ -9,7 +9,9 @@ import { DueAlertLine, DueHint, TaskBadge } from "@/components/StatusBadge";
 import { fetchMeetings, fetchPeople, fetchTasks, createPerson, createTask, updatePerson, deletePerson, type Meeting, type Person, type Task } from "@/lib/api";
 import { SelectWrap } from "@/components/FilterSelect";
 import { byDueDate, countDueAlerts, dateOnly, dueRemainingLabel, dueTone, formatDay, todayISO } from "@/lib/demo-data";
+import { ExportFormatDialog } from "@/components/FormatPicker";
 import { downloadPeopleRoster, downloadPersonReport } from "@/lib/export-lists";
+import type { ExportFormat } from "@/lib/export-office";
 import { useToast } from "@/components/Toast";
 
 const field =
@@ -112,6 +114,7 @@ export default function PeoplePage() {
   });
   const [exporting, setExporting] = useState(false);
   const [exportingPerson, setExportingPerson] = useState(false);
+  const [exportTarget, setExportTarget] = useState<"roster" | "person" | null>(null);
 
   useEffect(() => {
     Promise.all([fetchPeople(), fetchTasks(), fetchMeetings()])
@@ -307,7 +310,7 @@ export default function PeoplePage() {
     }
   }
 
-  async function exportRoster() {
+  async function exportRoster(format: ExportFormat) {
     if (exporting) return;
     setExporting(true);
     try {
@@ -317,16 +320,18 @@ export default function PeoplePage() {
           note: row.note,
           open: row.open,
         })),
+        format,
       );
-      toast("PDF indirildi");
+      setExportTarget(null);
+      toast("Dışa aktarıldı");
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "PDF hazırlanamadı");
+      toast(err instanceof Error ? err.message : "Dışa aktarılamadı");
     } finally {
       setExporting(false);
     }
   }
 
-  async function exportSelectedPerson() {
+  async function exportSelectedPerson(format: ExportFormat) {
     if (!selected || exportingPerson) return;
     setExportingPerson(true);
     try {
@@ -336,10 +341,11 @@ export default function PeoplePage() {
         open: selected.open,
         done: selected.done,
         meetings: selected.meetings,
-      });
-      toast("PDF indirildi");
+      }, format);
+      setExportTarget(null);
+      toast("Dışa aktarıldı");
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "PDF hazırlanamadı");
+      toast(err instanceof Error ? err.message : "Dışa aktarılamadı");
     } finally {
       setExportingPerson(false);
     }
@@ -355,10 +361,10 @@ export default function PeoplePage() {
           <button
             type="button"
             disabled={loading || exporting}
-            onClick={() => void exportRoster()}
+            onClick={() => setExportTarget("roster")}
             className="h-10 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-slate-200 dark:hover:bg-teal-900/40"
           >
-            {exporting ? "Hazırlanıyor…" : "PDF indir"}
+            {exporting ? "Hazırlanıyor…" : "Dışa aktar"}
           </button>
           <button
             type="button"
@@ -579,10 +585,10 @@ export default function PeoplePage() {
                 <button
                   type="button"
                   disabled={exportingPerson}
-                  onClick={() => void exportSelectedPerson()}
+                  onClick={() => setExportTarget("person")}
                   className="h-11 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-slate-200 dark:hover:bg-teal-900/40"
                 >
-                  {exportingPerson ? "Hazırlanıyor…" : "PDF indir"}
+                  {exportingPerson ? "Hazırlanıyor…" : "Dışa aktar"}
                 </button>
                 <button
                   type="button"
@@ -915,6 +921,17 @@ export default function PeoplePage() {
           </div>
         </div>
       ) : null}
+      <ExportFormatDialog
+        open={exportTarget !== null}
+        exporting={exporting || exportingPerson}
+        onClose={() => {
+          if (!exporting && !exportingPerson) setExportTarget(null);
+        }}
+        onConfirm={(format) => {
+          if (exportTarget === "person") void exportSelectedPerson(format);
+          else void exportRoster(format);
+        }}
+      />
     </AppShell>
   );
 }

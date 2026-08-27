@@ -66,9 +66,52 @@ export async function loginUser(body: {
   return response.json();
 }
 
+export async function requestPasswordReset(email: string): Promise<{ message: string; reset_url: string | null }> {
+  const response = await fetch(`${API_URL}/api/v1/auth/forgot-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
+export async function resetPassword(body: { token: string; password: string }): Promise<TokenResponse> {
+  const response = await fetch(`${API_URL}/api/v1/auth/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
 export async function fetchMe(token: string): Promise<AuthUser> {
   const response = await fetch(`${API_URL}/api/v1/auth/me`, {
     headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
+export async function updateProfile(name: string): Promise<AuthUser> {
+  const response = await fetch(`${API_URL}/api/v1/auth/me`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeader() },
+    body: JSON.stringify({ name }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
+export async function changePassword(body: {
+  current_password: string;
+  new_password: string;
+}): Promise<AuthUser> {
+  const response = await fetch(`${API_URL}/api/v1/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader() },
+    body: JSON.stringify(body),
   });
   if (!response.ok) throw new Error(await readError(response));
   return response.json();
@@ -95,6 +138,7 @@ export type Meeting = {
   attendees: string | null;
   named_attendees?: string | null;
   description: string | null;
+  language?: "tr" | "en";
   audio_path: string | null;
 };
 
@@ -124,6 +168,7 @@ export type ActionItem = {
 };
 
 export type Decision = {
+  seq?: number | null;
   text: string;
   source_seq: number | null;
   source_end_seq?: number | null;
@@ -182,6 +227,7 @@ export async function createMeeting(body: {
   date: string;
   attendees: string;
   description: string;
+  language: "tr" | "en";
   audio: File;
 }): Promise<Meeting> {
   const form = new FormData();
@@ -189,6 +235,7 @@ export async function createMeeting(body: {
   form.append("date", body.date);
   form.append("attendees", body.attendees);
   form.append("description", body.description);
+  form.append("language", body.language);
   form.append("audio", body.audio);
   const response = await fetch(`${API_URL}/api/v1/meetings`, {
     method: "POST",
@@ -238,6 +285,26 @@ export async function updateTranscriptLine(
     method: "PATCH",
     headers: { ...authHeader(), "Content-Type": "application/json" },
     body: JSON.stringify({ update_transcript: body }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return fetchMeeting(id);
+}
+
+export async function updateMeetingSummary(id: number, summary: string): Promise<MeetingDetail> {
+  const response = await fetch(`${API_URL}/api/v1/meetings/${id}`, {
+    method: "PATCH",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ summary }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return fetchMeeting(id);
+}
+
+export async function updateMeetingDecision(id: number, seq: number, text: string): Promise<MeetingDetail> {
+  const response = await fetch(`${API_URL}/api/v1/meetings/${id}`, {
+    method: "PATCH",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ update_decision: { seq, text } }),
   });
   if (!response.ok) throw new Error(await readError(response));
   return fetchMeeting(id);

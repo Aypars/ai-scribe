@@ -303,30 +303,33 @@ export function formatDate(iso: string | null | undefined): string {
   });
 }
 
-export function formatDay(iso: string | null | undefined): string {
+export function formatDay(iso: string | null | undefined, locale = "tr-TR"): string {
   if (!iso) return "—";
   const dayPart = iso.slice(0, 10);
+  const opts: Intl.DateTimeFormatOptions = { day: "numeric", month: "short", year: "numeric" };
   if (/^\d{4}-\d{2}-\d{2}$/.test(dayPart)) {
     const [year, month, day] = dayPart.split("-").map(Number);
-    return new Date(year, month - 1, day).toLocaleDateString("tr-TR", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-    });
+    return new Date(year, month - 1, day).toLocaleDateString(locale, opts);
   }
-  return new Date(iso).toLocaleDateString("tr-TR", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+  return new Date(iso).toLocaleDateString(locale, opts);
 }
 
-export function formatDuration(seconds: number | null): string {
+export function formatDuration(seconds: number | null, locale = "tr-TR"): string {
   if (seconds == null) return "—";
-  if (seconds < 60) return `${seconds}sn`;
+  const en = locale.toLowerCase().startsWith("en");
+  if (seconds < 60) return en ? `${seconds}s` : `${seconds}sn`;
   const hours = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
   const secs = seconds % 60;
+  if (en) {
+    if (hours) {
+      if (mins && secs) return `${hours}h ${mins}m ${secs}s`;
+      if (mins) return `${hours}h ${mins}m`;
+      return `${hours}h`;
+    }
+    if (secs) return `${mins}m ${secs}s`;
+    return `${mins}m`;
+  }
   if (hours) {
     if (mins && secs) return `${hours}s ${mins}dk ${secs}sn`;
     if (mins) return `${hours}s ${mins}dk`;

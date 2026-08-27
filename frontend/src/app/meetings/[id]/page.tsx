@@ -21,6 +21,8 @@ import {
   renameMeetingSpeaker,
   updateMeeting,
   updateMeetingAction,
+  updateMeetingDecision,
+  updateMeetingSummary,
   updateTranscriptLine,
   type ActionItem,
   type Decision,
@@ -31,6 +33,8 @@ import {
 import { dateOnly, dueTone, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/demo-data";
 import { ExportMeetingDialog } from "@/components/ExportMeetingDialog";
 import { downloadMeetingReport } from "@/lib/export-meeting";
+import { speakerStats, type SpeakerStat } from "@/lib/speaker-stats";
+import { talkColorClass } from "@/lib/talk-colors";
 
 const tabs = [
   { id: "transcript", label: "Transkript" },
@@ -47,6 +51,22 @@ const field =
 function formatClock(iso: string | null): string {
   if (!iso) return "";
   return new Date(iso).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function foldText(value: string): string {
+  return value.toLocaleLowerCase("tr").replace(/\s+/g, " ").trim();
+}
+
+function followUpFor(decision: Decision, actions: ActionItem[]): ActionItem | undefined {
+  const key = foldText(decision.text);
+  if (!key) return undefined;
+  return actions.find((item) => item.task_status && foldText(item.description) === key);
+}
+
+function suggestionFor(decision: Decision, actions: ActionItem[]): ActionItem | undefined {
+  const key = foldText(decision.text);
+  if (!key) return undefined;
+  return actions.find((item) => !item.task_status && foldText(item.description) === key);
 }
 
 function MetaStat({
@@ -66,6 +86,52 @@ function MetaStat({
       <div className="mt-1.5 text-sm font-medium text-slate-800 dark:text-teal-50">{value}</div>
       {hint ? <p className="mt-0.5 text-xs text-slate-400">{hint}</p> : null}
     </div>
+  );
+}
+
+function TalkShareCard({
+  speakers,
+  onPick,
+}: {
+  speakers: SpeakerStat[];
+  onPick: (name: string) => void;
+}) {
+  if (!speakers.length) return null;
+  return (
+    <section className="mt-6 rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-teal-800/40 dark:bg-[#0f2220]">
+      <p className="text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
+        Kim ne kadar konuştu
+      </p>
+      <div className="mt-3 flex h-3 gap-0.5 overflow-hidden rounded-full bg-slate-100 dark:bg-teal-950">
+        {speakers.map((row, index) =>
+          row.share < 1 ? null : (
+            <div
+              key={row.name}
+              title={`${row.name} %${row.share}`}
+              className={`h-full ${talkColorClass(index)}`}
+              style={{ width: `${row.share}%` }}
+            />
+          ),
+        )}
+      </div>
+      <ul className="mt-3 grid gap-1 sm:grid-cols-2">
+        {speakers.map((row, index) => (
+          <li key={row.name}>
+            <button
+              type="button"
+              onClick={() => onPick(row.name)}
+              className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-sm hover:bg-slate-50 dark:hover:bg-teal-900/40"
+            >
+              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${talkColorClass(index)}`} />
+              <span className="min-w-0 truncate font-medium text-slate-800 dark:text-teal-50">{row.name}</span>
+              <span className="ml-auto shrink-0 text-xs tabular-nums text-slate-500 dark:text-slate-400">
+                {formatDuration(row.seconds)} · %{row.share}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -306,6 +372,25 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return target.isContentEditable;
 }
 
+function EditPencil({ onClick, title = "Düzenle" }: { onClick: () => void; title?: string }) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-teal-900/50 dark:hover:text-teal-100"
+    >
+      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+        <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L4.8 18.75l.55-3.885a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Z" />
+      </svg>
+      Düzenle
+    </button>
+  );
+}
+
 function stripGuessMark(name: string): string {
   return name.replace(/\s*\?+\s*$/, "").trim();
 }
@@ -314,18 +399,11 @@ function isGuessName(name: string | null | undefined): boolean {
   return Boolean(name && /\S\s*\?+\s*$/.test(name));
 }
 
-function uniqueSpeakers(lines: TranscriptLine[]): { name: string; count: number; pending: boolean }[] {
-  const seen: string[] = [];
-  for (const line of lines) {
-    if (line.speaker && !seen.includes(line.speaker)) seen.push(line.speaker);
-  }
-  return seen.map((name) => ({
-    name,
-    count: lines.filter((line) => line.speaker === name).length,
-    pending:
-      isGuessName(name) ||
-      lines.some((line) => line.speaker === name && line.speaker_origin && line.speaker !== line.speaker_origin),
-  }));
+function isPendingSpeaker(name: string, lines: TranscriptLine[]): boolean {
+  return (
+    isGuessName(name) ||
+    lines.some((line) => line.speaker === name && line.speaker_origin && line.speaker !== line.speaker_origin)
+  );
 }
 
 function SpeakerGuessActions({
@@ -773,6 +851,18 @@ export default function MeetingDetailPage() {
   const [currentTime, setCurrentTime] = useState(0);
   const [focusSeq, setFocusSeq] = useState<number | null>(null);
   const [decisionView, setDecisionView] = useState<Decision | null>(null);
+  const [decisionDraft, setDecisionDraft] = useState<{
+    source: Decision;
+    title: string;
+    assignee: string;
+    assignee_id: number | null;
+    assigneeNote: string;
+    due_date: string;
+  } | null>(null);
+  const [decisionTaskSaving, setDecisionTaskSaving] = useState(false);
+  const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
+  const [decisionEdit, setDecisionEdit] = useState<{ seq: number; text: string } | null>(null);
+  const [analysisEditBusy, setAnalysisEditBusy] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const pendingSeekRef = useRef<number | null>(null);
   const focusRef = useRef<HTMLLIElement | null>(null);
@@ -1172,6 +1262,116 @@ export default function MeetingDetailPage() {
     }
   }
 
+  function startDecisionFollowUp(item: Decision) {
+    if (!meeting) return;
+    const existing = followUpFor(item, actionItems);
+    if (existing) {
+      router.push(`/tasks?task=${meeting.meeting_id}-${existing.seq}`);
+      return;
+    }
+    setSelected(null);
+    setDecisionDraft({
+      source: item,
+      title: item.text,
+      assignee: "",
+      assignee_id: null,
+      assigneeNote: "",
+      due_date: todayISO(),
+    });
+  }
+
+  async function handleCreateDecisionTask() {
+    if (!meeting || !decisionDraft) return;
+    const due = dateOnly(decisionDraft.due_date);
+    if (!due) {
+      setError("Görev oluşturmak için teslim tarihi gerekli");
+      return;
+    }
+    if (due < todayISO()) {
+      setError("Teslim tarihi geçmiş olamaz");
+      return;
+    }
+    setError(null);
+    setDecisionTaskSaving(true);
+    try {
+      const assigned = await ensurePerson(
+        decisionDraft.assignee_id,
+        decisionDraft.assignee,
+        decisionDraft.assigneeNote,
+      );
+      const suggestion = suggestionFor(decisionDraft.source, actionItems);
+      const title = decisionDraft.title.trim() || decisionDraft.source.text;
+      if (suggestion) {
+        await createTask({
+          meeting_id: meeting.meeting_id,
+          title,
+          assignee: assigned.assignee,
+          assignee_id: assigned.assignee_id,
+          due_date: due,
+          description: suggestion.notes || suggestion.description,
+          action_seq: suggestion.seq,
+        });
+      } else {
+        await createTask({
+          meeting_id: meeting.meeting_id,
+          title,
+          assignee: assigned.assignee,
+          assignee_id: assigned.assignee_id,
+          due_date: due,
+          description: decisionDraft.source.text,
+        });
+      }
+      const updated = await fetchMeeting(meeting.meeting_id);
+      setMeeting(updated);
+      setActionItems(updated.actions.map((item) => ({ ...item })));
+      setDecisionDraft(null);
+      toast("Görev oluşturuldu");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Görev oluşturulamadı");
+    } finally {
+      setDecisionTaskSaving(false);
+    }
+  }
+
+  async function handleSaveSummary() {
+    if (!meeting || summaryDraft == null) return;
+    setError(null);
+    setAnalysisEditBusy(true);
+    try {
+      const updated = await updateMeetingSummary(meeting.meeting_id, summaryDraft);
+      setMeeting(updated);
+      setSummaryDraft(null);
+      toast("Özet kaydedildi");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Özet kaydedilemedi");
+    } finally {
+      setAnalysisEditBusy(false);
+    }
+  }
+
+  async function handleSaveDecision() {
+    if (!meeting || !decisionEdit) return;
+    const text = decisionEdit.text.trim();
+    if (!text) {
+      setError("Karar boş olamaz");
+      return;
+    }
+    setError(null);
+    setAnalysisEditBusy(true);
+    try {
+      const updated = await updateMeetingDecision(meeting.meeting_id, decisionEdit.seq, text);
+      setMeeting(updated);
+      const next = updated.decisions.find((item) => item.seq === decisionEdit.seq) ?? null;
+      if (decisionView?.seq === decisionEdit.seq) setDecisionView(next);
+      setDecisionEdit(null);
+      toast("Karar kaydedildi");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Karar kaydedilemedi");
+    } finally {
+      setAnalysisEditBusy(false);
+    }
+  }
+
   async function handleDismissAction(item: ActionItem) {
     if (!meeting) return;
     const ok = await confirm({
@@ -1241,7 +1441,7 @@ export default function MeetingDetailPage() {
     ? meeting.transcript
     : splitTranscriptSentences(meeting.transcript);
   const usingOriginalLines = meeting.transcript.some((line) => line.speaker);
-  const speakers = uniqueSpeakers(lines);
+  const speakers = speakerStats(lines, meeting.duration, (name) => isPendingSpeaker(name, lines));
   const attendeeValue = (meeting.named_attendees || "").trim()
     ? meeting.named_attendees
     : speakers.length
@@ -1369,6 +1569,9 @@ export default function MeetingDetailPage() {
                   <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-900 dark:text-teal-50">
                     {meeting.title}
                   </h1>
+                  <p className="mt-1 text-xs font-medium text-teal-700 dark:text-teal-300">
+                    {(meeting.language || "").trim().toLowerCase() === "en" ? "English" : "Türkçe"}
+                  </p>
                   {meeting.description ? (
                     <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600 dark:text-slate-300">
                       {meeting.description}
@@ -1414,7 +1617,7 @@ export default function MeetingDetailPage() {
                     onClick={() => setExportOpen(true)}
                     className="h-9 cursor-pointer rounded-lg border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-slate-200 dark:hover:bg-teal-900/40"
                   >
-                    PDF indir
+                    Dışa aktar
                   </button>
                 ) : null}
                 <button
@@ -1731,10 +1934,10 @@ export default function MeetingDetailPage() {
                 {speakers.length > 0 ? (
                   <aside className="relative z-10 lg:sticky lg:top-4 lg:max-h-[calc(100dvh-18rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto lg:border-l lg:border-slate-100 lg:pl-6 dark:lg:border-teal-800/50">
                     <p className="mb-3 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
-                      Konuşmacılar
+                      Konuşma payı
                     </p>
                     <ul className="space-y-2">
-                      {speakers.map((item) => {
+                      {speakers.map((item, index) => {
                         const editing = bulkEdit === item.name;
                         const active = filterSpeaker === item.name;
                         return (
@@ -1801,17 +2004,31 @@ export default function MeetingDetailPage() {
                                     : "border-slate-200 hover:border-teal-400 hover:bg-slate-50 dark:border-teal-800 dark:hover:bg-teal-900/30"
                                 }`}
                               >
-                                <p className={`text-sm font-semibold ${active ? "text-teal-800 dark:text-teal-200" : "text-slate-800 dark:text-slate-200"}`}>
-                                  {item.name}
-                                  {item.pending ? (
-                                    <SpeakerGuessActions
-                                      busy={speakerBusy}
-                                      onConfirm={() => void handleSpeakerGuess(item.name, "confirm")}
-                                      onReject={() => void handleSpeakerGuess(item.name, "reject")}
-                                    />
-                                  ) : null}
+                                <div className="flex items-start justify-between gap-2">
+                                  <p className={`min-w-0 truncate text-sm font-semibold ${active ? "text-teal-800 dark:text-teal-200" : "text-slate-800 dark:text-slate-200"}`}>
+                                    <span className={`mr-1.5 inline-block h-2 w-2 rounded-full ${talkColorClass(index)}`} />
+                                    {item.name}
+                                    {item.pending ? (
+                                      <SpeakerGuessActions
+                                        busy={speakerBusy}
+                                        onConfirm={() => void handleSpeakerGuess(item.name, "confirm")}
+                                        onReject={() => void handleSpeakerGuess(item.name, "reject")}
+                                      />
+                                    ) : null}
+                                  </p>
+                                  <p className="shrink-0 text-xs font-semibold tabular-nums text-teal-700 dark:text-teal-300">
+                                    %{item.share}
+                                  </p>
+                                </div>
+                                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-teal-950">
+                                  <div
+                                    className={`h-full rounded-full ${talkColorClass(index)}`}
+                                    style={{ width: `${Math.min(100, item.share)}%` }}
+                                  />
+                                </div>
+                                <p className="mt-1.5 text-xs text-slate-400">
+                                  {formatDuration(item.seconds)} · {item.count} tur
                                 </p>
-                                <p className="mt-0.5 text-xs text-slate-400">{item.count} satır</p>
                                 <button
                                   type="button"
                                   onClick={(event) => {
@@ -1831,6 +2048,10 @@ export default function MeetingDetailPage() {
                   </aside>
                 ) : null}
               </div>
+              <TalkShareCard
+                speakers={speakers}
+                onPick={(name) => setFilterSpeaker(name)}
+              />
               </div>
             )}
             </div>
@@ -1838,8 +2059,43 @@ export default function MeetingDetailPage() {
 
           {tab === "summary" && (
             <>
-              <p className="mb-4 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">Toplantı özeti</p>
-              {summary ? (
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
+                  Toplantı özeti
+                </p>
+                {summaryDraft == null && !analysisBusy ? (
+                  <EditPencil onClick={() => setSummaryDraft(summary ?? "")} />
+                ) : null}
+              </div>
+              {summaryDraft != null ? (
+                <div className="space-y-3">
+                  <textarea
+                    autoFocus
+                    rows={14}
+                    value={summaryDraft}
+                    onChange={(e) => setSummaryDraft(e.target.value)}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-7 text-slate-800 outline-none focus:border-teal-600 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={analysisEditBusy}
+                      onClick={() => void handleSaveSummary()}
+                      className="h-9 cursor-pointer rounded-lg bg-teal-700 px-3.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-60"
+                    >
+                      {analysisEditBusy ? "Kaydediliyor…" : "Kaydet"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={analysisEditBusy}
+                      onClick={() => setSummaryDraft(null)}
+                      className="h-9 cursor-pointer rounded-lg px-3.5 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-teal-900/40"
+                    >
+                      Vazgeç
+                    </button>
+                  </div>
+                </div>
+              ) : summary ? (
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 px-5 py-5 dark:border-teal-800/50 dark:bg-teal-950/40">
                   <div className="space-y-4 text-sm leading-7 text-slate-800 dark:text-slate-200">
                     {summary
@@ -1847,9 +2103,14 @@ export default function MeetingDetailPage() {
                       .map((para) => para.trim())
                       .filter(Boolean)
                       .map((para, index) => {
-                        const heading = ["çerçeve", "gündem akışı", "sonuç"].includes(
-                          para.toLocaleLowerCase("tr-TR"),
-                        );
+                        const heading = [
+                          "çerçeve",
+                          "gündem akışı",
+                          "sonuç",
+                          "context",
+                          "agenda",
+                          "outcome",
+                        ].includes(para.toLocaleLowerCase("tr-TR"));
                         return heading ? (
                           <h3
                             key={index}
@@ -1890,12 +2151,76 @@ export default function MeetingDetailPage() {
             <>
               <button
                 type="button"
-                onClick={() => setDecisionView(null)}
+                onClick={() => {
+                  setDecisionEdit(null);
+                  setDecisionView(null);
+                }}
                 className="cursor-pointer text-xs font-medium text-teal-700 hover:underline dark:text-teal-300"
               >
                 ← Kararlar
               </button>
-              <p className="mt-3 text-sm leading-6 text-slate-800 dark:text-slate-200">{decisionView.text}</p>
+              <div className="mt-3 flex items-start justify-between gap-3">
+                <p className="text-sm leading-6 text-slate-800 dark:text-teal-50">Karar</p>
+                {decisionView.seq != null && decisionEdit?.seq !== decisionView.seq && !analysisBusy ? (
+                  <EditPencil
+                    onClick={() => setDecisionEdit({ seq: decisionView.seq as number, text: decisionView.text })}
+                  />
+                ) : null}
+              </div>
+              {decisionEdit && decisionEdit.seq === decisionView.seq ? (
+                <div className="mt-2 space-y-3">
+                  <textarea
+                    autoFocus
+                    rows={5}
+                    value={decisionEdit.text}
+                    onChange={(e) => setDecisionEdit({ ...decisionEdit, text: e.target.value })}
+                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none focus:border-teal-600 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={analysisEditBusy}
+                      onClick={() => void handleSaveDecision()}
+                      className="h-9 cursor-pointer rounded-lg bg-teal-700 px-3.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-60"
+                    >
+                      {analysisEditBusy ? "Kaydediliyor…" : "Kaydet"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={analysisEditBusy}
+                      onClick={() => setDecisionEdit(null)}
+                      className="h-9 cursor-pointer rounded-lg px-3.5 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-teal-900/40"
+                    >
+                      Vazgeç
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-sm leading-6 text-slate-800 dark:text-slate-200">{decisionView.text}</p>
+              )}
+              {(() => {
+                const follow = followUpFor(decisionView, actionItems);
+                return (
+                  <div className="mt-4">
+                    {follow ? (
+                      <Link
+                        href={`/tasks?task=${meeting.meeting_id}-${follow.seq}`}
+                        className="inline-flex h-9 items-center rounded-lg bg-teal-700 px-3.5 text-sm font-medium text-white hover:bg-teal-800"
+                      >
+                        Görevi aç
+                      </Link>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => startDecisionFollowUp(decisionView)}
+                        className="h-9 cursor-pointer rounded-lg bg-teal-700 px-3.5 text-sm font-medium text-white hover:bg-teal-800"
+                      >
+                        Görev oluştur
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
               <p className="mt-5 mb-4 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
                 İlgili konuşma
                 {formatDecisionSpan(decisionView) ? ` · ${formatDecisionSpan(decisionView)}` : ""}
@@ -1943,31 +2268,88 @@ export default function MeetingDetailPage() {
                 <ul className="space-y-3">
                   {decisionList.map((item, index) => {
                     const span = formatDecisionSpan(item);
+                    const follow = followUpFor(item, actionItems);
+                    const editing = item.seq != null && decisionEdit?.seq === item.seq;
                     return (
                     <li
-                      key={`${index}-${item.text}`}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => openDecision(item)}
+                      key={item.seq ?? `${index}-${item.text}`}
+                      role={editing ? undefined : "button"}
+                      tabIndex={editing ? undefined : 0}
+                      onClick={() => {
+                        if (!editing) openDecision(item);
+                      }}
                       onKeyDown={(e) => {
-                        if (isTypingTarget(e.target)) return;
+                        if (editing || isTypingTarget(e.target)) return;
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           openDecision(item);
                         }
                       }}
-                      className="flex cursor-pointer gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5 hover:border-teal-600 dark:border-teal-800/50 dark:bg-teal-950/40 dark:hover:border-teal-500"
+                      className={`flex gap-3 rounded-xl border px-4 py-3.5 ${
+                        editing
+                          ? "border-teal-600 bg-white dark:border-teal-500 dark:bg-[#0c1c1b]"
+                          : "cursor-pointer border-slate-200 bg-slate-50 hover:border-teal-600 dark:border-teal-800/50 dark:bg-teal-950/40 dark:hover:border-teal-500"
+                      }`}
                     >
                       <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-200 text-xs font-semibold text-slate-600 dark:bg-teal-800 dark:text-teal-100">
                         {index + 1}
                       </span>
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm leading-6 text-slate-800 dark:text-slate-200">{item.text}</p>
-                        {span ? (
-                          <p className="mt-2 text-xs font-medium text-teal-700 dark:text-teal-300">
-                            İlgili konuşma · {span}
-                          </p>
-                        ) : null}
+                        {editing ? (
+                          <div className="space-y-3" onClick={(event) => event.stopPropagation()}>
+                            <textarea
+                              autoFocus
+                              rows={4}
+                              value={decisionEdit.text}
+                              onChange={(e) => setDecisionEdit({ ...decisionEdit, text: e.target.value })}
+                              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-800 outline-none focus:border-teal-600 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                disabled={analysisEditBusy}
+                                onClick={() => void handleSaveDecision()}
+                                className="h-9 cursor-pointer rounded-lg bg-teal-700 px-3.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-60"
+                              >
+                                {analysisEditBusy ? "Kaydediliyor…" : "Kaydet"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={analysisEditBusy}
+                                onClick={() => setDecisionEdit(null)}
+                                className="h-9 cursor-pointer rounded-lg px-3.5 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-teal-900/40"
+                              >
+                                Vazgeç
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-start justify-between gap-2">
+                              <p className="text-sm leading-6 text-slate-800 dark:text-slate-200">{item.text}</p>
+                              {item.seq != null && !analysisBusy ? (
+                                <EditPencil
+                                  onClick={() => setDecisionEdit({ seq: item.seq as number, text: item.text })}
+                                />
+                              ) : null}
+                            </div>
+                            {span ? (
+                              <p className="mt-2 text-xs font-medium text-teal-700 dark:text-teal-300">
+                                İlgili konuşma · {span}
+                              </p>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                startDecisionFollowUp(item);
+                              }}
+                              className="mt-2 cursor-pointer text-xs font-medium text-teal-700 hover:text-teal-800 dark:text-teal-300"
+                            >
+                              {follow ? "Görevi aç" : "Görev oluştur"}
+                            </button>
+                          </>
+                        )}
                       </div>
                     </li>
                     );
@@ -2102,9 +2484,9 @@ export default function MeetingDetailPage() {
           void downloadMeetingReport(meeting, options)
             .then(() => {
               setExportOpen(false);
-              toast(options.transcript === "attach" ? "Tutanak ve transkript indirildi" : "PDF indirildi");
+              toast(options.transcript === "attach" ? "Tutanak ve transkript indirildi" : "Dışa aktarıldı");
             })
-            .catch(() => toast("PDF oluşturulamadı"))
+            .catch(() => toast("Dışa aktarılamadı"))
             .finally(() => setExporting(false));
         }}
       />
@@ -2200,6 +2582,91 @@ export default function MeetingDetailPage() {
                 className="ml-auto h-11 cursor-pointer rounded-lg px-4 text-sm font-medium text-rose-600 hover:bg-rose-50"
               >
                 Sil
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+      {decisionDraft && (
+        <div className="fixed inset-0 z-20 flex justify-end bg-slate-950/30">
+          <button
+            type="button"
+            className="h-full flex-1 cursor-pointer"
+            aria-label="Kapat"
+            onClick={() => {
+              if (!decisionTaskSaving) setDecisionDraft(null);
+            }}
+          />
+          <aside className="h-full w-full max-w-md overflow-y-auto bg-white p-6 shadow-2xl dark:bg-[#0f2220] dark:text-teal-50">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs text-slate-400">Karar takibi</p>
+                <h2 className="mt-1 text-lg font-semibold text-slate-900 dark:text-teal-50">Görev oluştur</h2>
+              </div>
+              <button
+                type="button"
+                disabled={decisionTaskSaving}
+                onClick={() => setDecisionDraft(null)}
+                className="cursor-pointer text-slate-400 hover:text-slate-700"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">{decisionDraft.source.text}</p>
+            <div className="mt-6 space-y-4 text-sm">
+              <label className="flex flex-col gap-1.5">
+                <span className="font-medium text-slate-700 dark:text-teal-100">Başlık</span>
+                <input
+                  value={decisionDraft.title}
+                  onChange={(e) => setDecisionDraft({ ...decisionDraft, title: e.target.value })}
+                  className={field}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="font-medium text-slate-700 dark:text-teal-100">Sorumlu</span>
+                <PersonPicker
+                  attendeeNames={speakers.map((item) => stripGuessMark(item.name) || item.name)}
+                  people={meeting.people}
+                  valueId={decisionDraft.assignee_id}
+                  valueName={decisionDraft.assignee}
+                  onChange={(personId, name, note) => {
+                    setDecisionDraft({
+                      ...decisionDraft,
+                      assignee_id: personId,
+                      assignee: name,
+                      assigneeNote: note ?? "",
+                    });
+                  }}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="font-medium text-slate-700 dark:text-teal-100">Son tarih</span>
+                <input
+                  type="date"
+                  required
+                  min={todayISO()}
+                  value={decisionDraft.due_date}
+                  onChange={(e) => setDecisionDraft({ ...decisionDraft, due_date: e.target.value })}
+                  className={field}
+                />
+              </label>
+            </div>
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                disabled={decisionTaskSaving}
+                onClick={() => void handleCreateDecisionTask()}
+                className="h-11 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
+              >
+                {decisionTaskSaving ? "Oluşturuluyor…" : "Görev oluştur"}
+              </button>
+              <button
+                type="button"
+                disabled={decisionTaskSaving}
+                onClick={() => setDecisionDraft(null)}
+                className="h-11 cursor-pointer rounded-lg px-4 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-teal-900/40"
+              >
+                Vazgeç
               </button>
             </div>
           </aside>
