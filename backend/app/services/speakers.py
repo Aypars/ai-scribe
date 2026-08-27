@@ -1,23 +1,25 @@
-"""Map generic diarization labels to real person names via Gemini."""
+"""Match diarization labels to names the user typed at upload."""
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 
 from pydantic import BaseModel, Field
 
-from app.services.turkish import title_word
+from app.services.turkish import lower_tr, title_word
 
 logger = logging.getLogger(__name__)
 
 GENERIC_LABEL = re.compile(r"^Konuşmacı\s+[A-Z0-9]+$", re.I)
 _STRIP_PREFIX = re.compile(r"^sayın\s+", re.I)
+_SPLIT_NAMES = re.compile(r"[,;\n]+")
 
 
 class SpeakerGuess(BaseModel):
     label: str = Field(description="Konuşmacı A gibi diarization etiketi")
-    name: str = Field(description="Transkriptteki kişi adı")
+    name: str = Field(description="Kullanıcının verdiği listedeki kişi adı")
 
 
 class SpeakerGuessList(BaseModel):
@@ -34,12 +36,11 @@ def revert_invalid_speaker_names(_lines: list) -> dict[str, str]:
     return {}
 
 
-def _strip_guess_mark(name: str) -> str:
+def strip_guess_mark(name: str) -> str:
     return name.strip().removesuffix("?").strip()
 
 
 def speaker_name(raw: str | None) -> str | None:
-    """Take Gemini's name as-is. Empty or a leftover Konuşmacı etiketi is not a name."""
     text = re.sub(r"\s+", " ", (raw or "").strip(" .,;:!?-"))
     text = _STRIP_PREFIX.sub("", text).strip()
     if not text or is_generic_label(text):
@@ -49,24 +50,31 @@ def speaker_name(raw: str | None) -> str | None:
 
 
 def display_name(name: str, *, guessed: bool = False) -> str:
-    clean = _strip_guess_mark(name)
+    clean = strip_guess_mark(name)
     return f"{clean} ?" if guessed else clean
+
+
+def parse_named_attendees(raw: str | None) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in _SPLIT_NAMES.split(raw or ""):
+        name = speaker_name(part)
+        if not name:
+            continue
+        key = lower_tr(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
 
 
 def rewrite_labels(text: str, mapping: dict[str, str]) -> str:
     out = text or ""
     for label, name in sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True):
         if label and name and label != name:
-            out = out.replace(label, _strip_guess_mark(name))
+            out = out.replace(label, name)
     return out
-
-
-def _transcript_for_names(lines: list) -> str:
-    return "\n".join(
-        f"[#{row.seq}] {row.speaker or 'Konuşmacı'}: {(row.text or '').strip()}"
-        for row in lines
-        if (row.text or "").strip()
-    )
 
 
 def _match_label(raw: str, allowed: dict[str, str]) -> str | None:
@@ -80,9 +88,107 @@ def _match_label(raw: str, allowed: dict[str, str]) -> str | None:
     return allowed.get(f"konuşmacı {short}".casefold())
 
 
-def _gemini_map(lines: list, *, title: str) -> dict[str, SpeakerGuess]:
+_INVITE = re.compile(
+    r"\b(buyur(?:un|unuz|urum)?|söz\s+(?:sizde|sizin|onun)|mikrofon(?:u|unu)?\s+(?:ver|al)|söz\s+ver)\b",
+    re.I,
+)
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    needle = lower_tr(name).strip()
+    if len(needle) < 2:
+        return False
+    pattern = re.compile(rf"(?<![0-9a-zçğıöşü]){re.escape(needle)}(?![0-9a-zçğıöşü])")
+    return bool(pattern.search(lower_tr(text or "")))
+
+
+def name_in_transcript(name: str, lines: list) -> bool:
+    return any(_name_in_text(name, row.text or "") for row in lines)
+
+
+def _is_invite_for(text: str, name: str) -> bool:
+    if not _name_in_text(name, text):
+        return False
+    folded = lower_tr(text)
+    if _INVITE.search(folded):
+        return True
+    stripped = folded.strip()
+    return stripped.startswith("sayın") and len(stripped) < 90
+
+
+def speaker_invites_name(label: str, name: str, lines: list) -> bool:
+    mentions: list[bool] = []
+    for row in lines:
+        if (row.speaker or "").strip() != label:
+            continue
+        if not _name_in_text(name, row.text or ""):
+            continue
+        mentions.append(_is_invite_for(row.text or "", name))
+    return bool(mentions) and all(mentions)
+
+
+def _resolve_declared(raw: str | None, declared: list[str]) -> str | None:
+    text = speaker_name(raw)
+    if not text:
+        return None
+    folded = lower_tr(text)
+    exact = [name for name in declared if lower_tr(name) == folded]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None
+    partial = [
+        name
+        for name in declared
+        if lower_tr(name).startswith(folded) or folded.startswith(lower_tr(name))
+    ]
+    if len(partial) == 1:
+        return partial[0]
+    return None
+
+
+def filter_speaker_mappings(
+    items: list,
+    lines: list,
+    names: list[str],
+) -> dict[str, str]:
+    """Keep AI guesses only when the name was declared and spoken."""
+    labels = {(row.speaker or "").strip() for row in lines if is_generic_label(row.speaker)}
+    if not labels or not names:
+        return {}
+    allowed = {label.casefold(): label for label in labels}
+    used: set[str] = set()
+    mapping: dict[str, str] = {}
+    for item in items:
+        label = _match_label(getattr(item, "label", None), allowed)
+        name = _resolve_declared(getattr(item, "name", None), names)
+        if not label or not name or name in used:
+            continue
+        if not name_in_transcript(name, lines):
+            logger.warning("Skip speaker map %s → %s; name not in transcript", label, name)
+            continue
+        if speaker_invites_name(label, name, lines):
+            logger.warning("Skip speaker map %s → %s; this label only invites that name", label, name)
+            continue
+        used.add(name)
+        mapping[label] = display_name(name, guessed=True)
+    logger.warning("Speaker mappings kept %s/%s: %s", len(mapping), len(labels), mapping)
+    return mapping
+
+
+def _transcript_for_names(lines: list) -> str:
+    return "\n".join(
+        f"[#{row.seq}] {row.speaker or 'Konuşmacı'}: {(row.text or '').strip()}"
+        for row in lines
+        if (row.text or "").strip()
+    )
+
+
+def resolve_speaker_map(lines: list, *, title: str = "", names: list[str] | None = None) -> dict[str, str]:
+    declared = [name for name in (names or []) if name]
     labels = sorted({(row.speaker or "").strip() for row in lines if is_generic_label(row.speaker)})
-    if not labels:
+    mentioned = [name for name in declared if name_in_transcript(name, lines)]
+    if not labels or not mentioned:
         return {}
 
     from app.services.analysis import AnalysisError, _api_key, _generate_json
@@ -93,13 +199,17 @@ def _gemini_map(lines: list, *, title: str) -> dict[str, SpeakerGuess]:
 
     from google import genai
 
-    prompt = f"""Transkriptteki Konuşmacı A/B/C… etiketlerini gerçek kişi adlarıyla eşle.
+    prompt = f"""Konuşmacı A/B/C etiketlerini yalnızca kullanıcının verdiği isimlerle eşle.
+
+Katılımcı listesi (bunların DIŞINDA isim yazma): {", ".join(mentioned)}
 
 Kural:
-- Başkan "Buyurun Sayın Mehmet Yılmaz" deyip ardından o etiket konuşuyorsa o kişidir.
-- Biri kendini "Ben İsmail Bey" diye tanıtıyorsa odur.
-- name alanına transkriptte geçen kişi adını yaz.
-- Eşleyemediğin etiketi listeden tamamen çıkar. Uydurma, tahmin, cümle, fiil yazma.
+- name yalnızca bu listedeki bir isim olsun. Yeni kişi uydurma.
+- Transkriptte o isim açıkça geçmiyorsa o kişiyi eşleme.
+- "Buyurun Simge Hanım / Söz Simge Hanım'da" DİYEN kişi o isim değildir; davet eden başkan/moderatördür.
+- Davetten hemen SONRA konuşmaya başlayan FARKLI etiket o kişidir.
+- Biri kendini listedeki isimle tanıtıyorsa odur.
+- Kanıt yoksa o etiketi listeden çıkar. Tahmin yasak.
 
 Toplantı: {title}
 Etiketler: {", ".join(labels)}
@@ -109,36 +219,20 @@ Transkript:
 """
     client = genai.Client(api_key=api_key)
     try:
-        draft = _generate_json(client, prompt, SpeakerGuessList, max_output_tokens=4096, waits=(0, 6))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                lambda: _generate_json(
+                    client, prompt, SpeakerGuessList, max_output_tokens=2048, waits=(0,)
+                )
+            )
+            draft = future.result(timeout=30)
+    except concurrent.futures.TimeoutError:
+        logger.warning("Speaker name resolution timed out")
+        return {}
     except AnalysisError:
         logger.exception("Speaker name resolution via Gemini failed")
         return {}
-    out: dict[str, SpeakerGuess] = {}
-    allowed = {label.casefold(): label for label in labels}
-    for item in draft.mappings:
-        label = _match_label(item.label, allowed)
-        name = speaker_name(item.name)
-        if not label or not name:
-            continue
-        out[label] = SpeakerGuess(label=label, name=name)
-    logger.warning("Gemini speaker mappings kept %s/%s: %s", len(out), len(labels), out)
-    return out
-
-
-def _put_map(mapping: dict[str, str], lines: list, label: str, shown: str) -> None:
-    mapping[label] = shown
-    for row in lines:
-        current = (row.speaker or "").strip()
-        origin = (row.speaker_origin or "").strip()
-        if current == label or origin == label:
-            mapping[current] = shown
-
-
-def resolve_speaker_map(lines: list, *, title: str) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    try:
-        for label, guess in _gemini_map(lines, title=title).items():
-            _put_map(mapping, lines, label, display_name(guess.name, guessed=False))
     except Exception:
-        logger.exception("Speaker name resolution via Gemini failed")
-    return {source: target for source, target in mapping.items() if source and target and source != target}
+        logger.exception("Speaker name resolution failed")
+        return {}
+    return filter_speaker_mappings(draft.mappings, lines, declared)

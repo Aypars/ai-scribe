@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 
 import { AppShell } from "@/components/AppShell";
+import { AttendeeListEditor, joinAttendeeList } from "@/components/AttendeeListEditor";
 import { useToast } from "@/components/Toast";
 import { createMeeting } from "@/lib/api";
 import { nowDatetimeLocal } from "@/lib/demo-data";
@@ -23,6 +24,7 @@ export default function NewMeetingPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(nowDatetimeLocal);
+  const [attendeeNames, setAttendeeNames] = useState<string[]>([]);
   const [description, setDescription] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
@@ -49,7 +51,7 @@ export default function NewMeetingPage() {
       const meeting = await createMeeting({
         title,
         date,
-        attendees: "",
+        attendees: joinAttendeeList(attendeeNames),
         description,
         audio: file,
       });
@@ -68,7 +70,8 @@ export default function NewMeetingPage() {
         className="mx-auto max-w-2xl space-y-5 rounded-2xl border border-slate-200/80 bg-white p-8 shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:border-teal-800/40 dark:bg-[#0f2220]"
       >
         <p className="text-sm text-slate-500">
-          Ses dosyanızı yükleyin; yapay zekâ yazıya çevirip analiz edecek.
+          Ses dosyanızı yükleyin; yazıya çevirme bittikten sonra katılımcılar konuşmacılara eşlenir.
+          Özet ve görev atama için transkript hazır olunca Analiz yap’a basarsınız.
         </p>
         <label className="flex flex-col gap-1.5 text-sm">
           <span className="font-medium text-slate-700 dark:text-slate-300">Toplantı başlığı</span>
@@ -92,6 +95,14 @@ export default function NewMeetingPage() {
           />
         </label>
         <label className="flex flex-col gap-1.5 text-sm">
+          <span className="font-medium text-slate-700 dark:text-slate-300">Katılımcılar</span>
+          <AttendeeListEditor
+            names={attendeeNames}
+            onChange={setAttendeeNames}
+            hint="İsmi yazıp Onayla’ya basın. Transkriptte adı geçmeyen kişi konuşmacıya bağlanmaz."
+          />
+        </label>
+        <label className="flex flex-col gap-1.5 text-sm">
           <span className="font-medium text-slate-700 dark:text-slate-300">Açıklama</span>
           <textarea
             rows={3}
@@ -102,9 +113,6 @@ export default function NewMeetingPage() {
             className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50 dark:focus:border-teal-500"
           />
         </label>
-        <p className="text-sm text-slate-500 dark:text-slate-400">
-          Katılımcılar yazıya çevirme sonrası konuşmacılardan doldurulur.
-        </p>
         <div className="flex flex-col gap-2 text-sm">
           <span className="font-medium text-slate-700 dark:text-slate-300">Ses dosyası</span>
           <input
@@ -165,7 +173,7 @@ export default function NewMeetingPage() {
             disabled={saving}
             className="h-11 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {saving ? "Yükleniyor…" : "Yükle ve analiz et"}
+            {saving ? "Yükleniyor…" : "Yükle ve yazıya çevir"}
           </button>
         </div>
       </form>

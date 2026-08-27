@@ -59,6 +59,9 @@ def ensure_schema() -> None:
         ("tasks", "assignee_id", "INTEGER REFERENCES people (person_id) ON DELETE SET NULL"),
         ("decisions", "source_seq", "INTEGER"),
         ("decisions", "source_end_seq", "INTEGER"),
+        ("meetings", "named_attendees", "TEXT"),
+        ("meetings", "analysis_error", "TEXT"),
+        ("meetings", "speakers_matched", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ]
     with engine.begin() as conn:
         conn.execute(text("SET lock_timeout = '2s'"))

@@ -28,7 +28,10 @@ CREATE TABLE meetings (
                CHECK (status IN ('uploaded', 'transcribed', 'analyzed', 'failed')),
     duration   INTEGER CHECK (duration IS NULL OR duration >= 0),
     attendees  TEXT,
+    named_attendees TEXT,
     description TEXT,
+    analysis_error TEXT,
+    speakers_matched BOOLEAN NOT NULL DEFAULT FALSE,
     audio_path VARCHAR(1024)
 );
 

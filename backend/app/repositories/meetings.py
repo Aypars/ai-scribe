@@ -66,10 +66,36 @@ def attendees_from_speakers(rows: list) -> str | None:
     return ", ".join(names) if names else None
 
 
+def display_attendees(meeting: Meeting, rows: list | None = None) -> str | None:
+    named = (meeting.named_attendees or "").strip()
+    if named:
+        return named
+    if rows is not None:
+        return attendees_from_speakers(rows) or meeting.attendees
+    return meeting.attendees
+
+
 def _apply_attendees(meeting: Meeting, rows: list) -> None:
     joined = attendees_from_speakers(rows)
     if joined:
         meeting.attendees = joined
+
+
+def _rewrite_analysis_labels(db: Session, meeting: Meeting, mapping: dict[str, str]) -> None:
+    if not mapping:
+        return
+    from app.services.speakers import rewrite_labels
+
+    analysis = db.get(Analysis, meeting.meeting_id)
+    if analysis and analysis.summary:
+        analysis.summary = rewrite_labels(analysis.summary, mapping)
+    for decision in db.scalars(select(Decision).where(Decision.meeting_id == meeting.meeting_id)).all():
+        decision.text = rewrite_labels(decision.text or "", mapping)
+    for action in db.scalars(select(Action).where(Action.meeting_id == meeting.meeting_id)).all():
+        if action.assignee:
+            action.assignee = rewrite_labels(action.assignee, mapping)
+        if action.notes:
+            action.notes = rewrite_labels(action.notes, mapping)
 
 
 def list_for_user(db: Session, user_id: int) -> list[Meeting]:
@@ -128,15 +154,18 @@ def create_meeting(
     title: str,
     date: datetime | None,
     attendees: str | None,
+    named_attendees: str | None = None,
     description: str | None,
     audio_path: str,
 ) -> Meeting:
+    named = (named_attendees if named_attendees is not None else attendees) or None
     meeting = Meeting(
         user_id=user_id,
         title=title,
         date=date,
         status="uploaded",
         attendees=attendees,
+        named_attendees=named,
         description=description,
         audio_path=audio_path,
     )
@@ -154,6 +183,8 @@ def update_meeting(
     date: datetime | None = None,
     attendees: str | None = None,
     attendees_set: bool = False,
+    named_attendees: str | None = None,
+    named_attendees_set: bool = False,
     description: str | None = None,
     description_set: bool = False,
 ) -> Meeting:
@@ -163,6 +194,9 @@ def update_meeting(
         meeting.date = date
     if attendees_set:
         meeting.attendees = attendees
+    if named_attendees_set:
+        meeting.named_attendees = named_attendees
+        meeting.speakers_matched = False
     if description_set:
         meeting.description = description
     db.commit()
@@ -196,6 +230,8 @@ def replace_transcript(
     _apply_attendees(meeting, segments)
     meeting.duration = duration_seconds
     meeting.status = "transcribed"
+    meeting.speakers_matched = False
+    meeting.analysis_error = None
     from app.repositories import people as people_repo
 
     people_repo.sync_speakers_for_meeting(db, meeting, segments, commit=False)
@@ -241,7 +277,7 @@ def rename_speaker_all(db: Session, meeting: Meeting, from_speaker: str, speaker
 
 
 def apply_speaker_map(db: Session, meeting: Meeting, mapping: dict[str, str] | None = None) -> Meeting:
-    mapping = {key: _strip_guess_mark(value) for key, value in (mapping or {}).items()}
+    mapping = {key: value for key, value in (mapping or {}).items() if key and value and key != value}
     from app.services.speakers import is_generic_label
 
     for row in meeting.transcripts:
@@ -250,9 +286,8 @@ def apply_speaker_map(db: Session, meeting: Meeting, mapping: dict[str, str] | N
             if not row.speaker_origin:
                 row.speaker_origin = speaker
             row.speaker = mapping[speaker]
-        elif speaker.endswith("?"):
-            row.speaker = _strip_guess_mark(speaker)
     _apply_attendees(meeting, meeting.transcripts)
+    _rewrite_analysis_labels(db, meeting, mapping)
     from app.repositories import people as people_repo
 
     people_repo.sync_speakers_for_meeting(db, meeting, meeting.transcripts, commit=False)
@@ -286,16 +321,26 @@ def resolve_speaker_guess(db: Session, meeting: Meeting, pending_name: str, *, c
     target = pending_name.strip()
     if not target:
         return meeting
+    replacement = _strip_guess_mark(target) if confirm else ""
+    origin_seen = ""
     for row in meeting.transcripts:
         speaker = (row.speaker or "").strip()
         if speaker != target:
             continue
         origin = (row.speaker_origin or "").strip()
+        if origin and not origin_seen:
+            origin_seen = origin
         if confirm:
             row.speaker = _strip_guess_mark(speaker)
         else:
             row.speaker = origin or speaker
+            if not origin_seen:
+                origin_seen = row.speaker
         row.speaker_origin = None
+    if not confirm:
+        replacement = origin_seen
+    if replacement and replacement != target:
+        _rewrite_analysis_labels(db, meeting, {target: replacement})
     _apply_attendees(meeting, meeting.transcripts)
     from app.repositories import people as people_repo
 
@@ -411,7 +456,7 @@ def replace_analysis(db: Session, meeting: Meeting, result: AnalysisResult) -> M
                 meeting_id=meeting.meeting_id,
                 seq=start + added,
                 description=item.description,
-                assignee=(item.assignee or "").strip() or None,
+                assignee=None,
                 due_date=item.due_date,
                 notes=item.notes or None,
             )
@@ -419,6 +464,7 @@ def replace_analysis(db: Session, meeting: Meeting, result: AnalysisResult) -> M
         added += 1
 
     meeting.status = "analyzed"
+    meeting.analysis_error = None
     db.commit()
     db.refresh(meeting)
     logger.warning(

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -16,7 +16,10 @@ class Meeting(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="uploaded")
     duration: Mapped[int | None] = mapped_column(Integer)
     attendees: Mapped[str | None] = mapped_column(Text)
+    named_attendees: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
+    analysis_error: Mapped[str | None] = mapped_column(Text)
+    speakers_matched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     audio_path: Mapped[str | None] = mapped_column(String(1024))
 
     transcripts: Mapped[list["Transcript"]] = relationship(

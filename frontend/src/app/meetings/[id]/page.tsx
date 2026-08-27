@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { AppShell } from "@/components/AppShell";
+import { AttendeeListEditor, joinAttendeeList, parseAttendeeList } from "@/components/AttendeeListEditor";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { MeetingBadge, TaskBadge, DueHint } from "@/components/StatusBadge";
 import { PersonPicker } from "@/components/PersonPicker";
@@ -27,7 +28,9 @@ import {
   type TranscriptFlag,
   type TranscriptLine,
 } from "@/lib/api";
-import { dateOnly, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/demo-data";
+import { dateOnly, dueTone, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/demo-data";
+import { ExportMeetingDialog } from "@/components/ExportMeetingDialog";
+import { downloadMeetingReport } from "@/lib/export-meeting";
 
 const tabs = [
   { id: "transcript", label: "Transkript" },
@@ -173,8 +176,7 @@ function foldTr(value: string): string {
 function lineMatchesQuery(line: TranscriptLine, query: string): boolean {
   const needle = foldTr(query).trim();
   if (!needle) return true;
-  const hay = `${line.text} ${line.speaker ?? ""}`;
-  return foldTr(hay).includes(needle);
+  return foldTr(line.text).includes(needle);
 }
 
 function HighlightedText({ text, query }: { text: string; query: string }) {
@@ -297,7 +299,22 @@ function FlaggedLineText({
   return <>{parts}</>;
 }
 
-function uniqueSpeakers(lines: TranscriptLine[]): { name: string; count: number }[] {
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return target.isContentEditable;
+}
+
+function stripGuessMark(name: string): string {
+  return name.replace(/\s*\?+\s*$/, "").trim();
+}
+
+function isGuessName(name: string | null | undefined): boolean {
+  return Boolean(name && /\S\s*\?+\s*$/.test(name));
+}
+
+function uniqueSpeakers(lines: TranscriptLine[]): { name: string; count: number; pending: boolean }[] {
   const seen: string[] = [];
   for (const line of lines) {
     if (line.speaker && !seen.includes(line.speaker)) seen.push(line.speaker);
@@ -305,7 +322,49 @@ function uniqueSpeakers(lines: TranscriptLine[]): { name: string; count: number 
   return seen.map((name) => ({
     name,
     count: lines.filter((line) => line.speaker === name).length,
+    pending:
+      isGuessName(name) ||
+      lines.some((line) => line.speaker === name && line.speaker_origin && line.speaker !== line.speaker_origin),
   }));
+}
+
+function SpeakerGuessActions({
+  busy,
+  onConfirm,
+  onReject,
+}: {
+  busy: boolean;
+  onConfirm: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <span className="ml-1 inline-flex items-center gap-0.5 align-middle">
+      <button
+        type="button"
+        disabled={busy}
+        title="Onayla"
+        onClick={(event) => {
+          event.stopPropagation();
+          onConfirm();
+        }}
+        className="inline-flex h-5 w-5 cursor-pointer items-center justify-center rounded text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 dark:text-emerald-300 dark:hover:bg-emerald-950/50"
+      >
+        ✓
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        title="Konuşmacı etiketine dön"
+        onClick={(event) => {
+          event.stopPropagation();
+          onReject();
+        }}
+        className="inline-flex h-5 w-5 cursor-pointer items-center justify-center rounded text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50 dark:text-rose-300 dark:hover:bg-rose-950/50"
+      >
+        ✕
+      </button>
+    </span>
+  );
 }
 
 function SpeakerRenameBox({
@@ -344,6 +403,8 @@ function SpeakerRenameBox({
     <div
       ref={boxRef}
       className="absolute top-full left-0 z-20 mt-1 w-72 rounded-xl border border-slate-200 bg-white p-3 text-slate-900 shadow-lg dark:border-teal-800 dark:bg-[#0f2220] dark:text-teal-50"
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
     >
       <input
         autoFocus
@@ -351,7 +412,11 @@ function SpeakerRenameBox({
         disabled={busy}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && onSubmit) onSubmit();
+          e.stopPropagation();
+          if (e.key === "Enter" && onSubmit) {
+            e.preventDefault();
+            onSubmit();
+          }
         }}
         placeholder="Yeni isim"
         className="h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-sm font-medium text-slate-900 outline-none placeholder:text-slate-400 focus:border-teal-600 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
@@ -367,32 +432,44 @@ function LineSpeaker({
   editing,
   value,
   busy,
+  pending,
   onOpen,
   onChange,
   onClose,
   onRenameLine,
   onRenameAll,
+  onConfirm,
+  onReject,
 }: {
   name: string;
   seq: number;
   editing: boolean;
   value: string;
   busy: boolean;
+  pending?: boolean;
   onOpen: (seq: number, name: string) => void;
   onChange: (value: string) => void;
   onClose: () => void;
   onRenameLine: () => void;
   onRenameAll: () => void;
+  onConfirm?: () => void;
+  onReject?: () => void;
 }) {
   return (
     <div className="relative inline-flex items-center">
       <button
         type="button"
-        onClick={() => onOpen(seq, name)}
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpen(seq, name);
+        }}
         className="cursor-pointer font-semibold text-slate-800 hover:text-teal-700 hover:underline dark:text-teal-100 dark:hover:text-teal-300"
       >
-        {name.replace(/\s*\?+\s*$/, "").trim() || name}
+        {name}
       </button>
+      {pending && !editing && onConfirm && onReject ? (
+        <SpeakerGuessActions busy={busy} onConfirm={onConfirm} onReject={onReject} />
+      ) : null}
       {editing ? (
         <SpeakerRenameBox
           value={value}
@@ -627,6 +704,37 @@ function WorkingIndicator({ elapsed }: { elapsed: number }) {
   );
 }
 
+function isMatchingSpeakers(meeting: MeetingDetail | null | undefined): boolean {
+  return Boolean(meeting?.transcription?.message?.includes("eşleniyor"));
+}
+
+function isServerAnalyzing(meeting: MeetingDetail | null | undefined): boolean {
+  if (!meeting || meeting.status === "uploaded" || meeting.status === "failed") return false;
+  if (meeting.transcription?.error) return false;
+  const message = meeting.transcription?.message || "";
+  return Boolean(message) && !message.includes("eşleniyor");
+}
+
+function analysisProgressLabel(meeting: MeetingDetail, analysisBusy: boolean): string {
+  const message = (meeting.transcription?.message || "").trim();
+  if ((analysisBusy || isServerAnalyzing(meeting)) && message && !message.includes("eşleniyor")) {
+    return message;
+  }
+  if (analysisBusy || isServerAnalyzing(meeting)) return "Analiz ediliyor…";
+  return "";
+}
+
+function pendingAnalysisCopy(meeting: MeetingDetail, analysisBusy: boolean): string {
+  if (meeting.status === "uploaded") return "Yazıya çevriliyor…";
+  if (isMatchingSpeakers(meeting)) return "Konuşmacılar eşleniyor…";
+  const analyzing = analysisProgressLabel(meeting, analysisBusy);
+  if (analyzing) return analyzing;
+  if (meeting.status === "transcribed") {
+    return "Konuşmacı eşleşmelerini onaylayın, ardından Analiz yap’a basın.";
+  }
+  return "Henüz yok.";
+}
+
 export default function MeetingDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -642,9 +750,12 @@ export default function MeetingDetailPage() {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
   const [date, setDate] = useState("");
+  const [attendeeNames, setAttendeeNames] = useState<string[]>([]);
   const [description, setDescription] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [speakerBusy, setSpeakerBusy] = useState(false);
   const [lineEdit, setLineEdit] = useState<{ seq: number; current: string } | null>(null);
   const [lineName, setLineName] = useState("");
@@ -706,16 +817,17 @@ export default function MeetingDetailPage() {
         if (cancelled) return;
         setError(null);
         statusRef.current = data.status;
-        const serverAnalyzing =
-          Boolean(data.transcription?.message) &&
-          data.status !== "uploaded" &&
-          data.status !== "failed" &&
-          !data.transcription?.error;
-        if (analysisBusyRef.current && !serverAnalyzing && data.status === "analyzed") {
+        const matching = isMatchingSpeakers(data);
+        const serverAnalyzing = isServerAnalyzing(data);
+        if (
+          analysisBusyRef.current &&
+          !serverAnalyzing &&
+          (data.status === "analyzed" || Boolean(data.summary) || Boolean(data.transcription?.error))
+        ) {
           analysisBusyRef.current = false;
         }
         const busy = serverAnalyzing || analysisBusyRef.current;
-        pollRef.current = data.status === "uploaded" || serverAnalyzing || analysisBusyRef.current;
+        pollRef.current = data.status === "uploaded" || matching || busy;
         setAnalysisBusy(busy);
         setMeeting(data);
         setActionItems(data.actions.map((item) => ({ ...item })));
@@ -735,6 +847,7 @@ export default function MeetingDetailPage() {
         if (initial) {
           setTitle(data.title);
           setDate(toDatetimeLocal(data.date));
+          setAttendeeNames(parseAttendeeList(data.named_attendees ?? ""));
           setDescription(data.description ?? "");
           setEditing(new URLSearchParams(window.location.search).get("edit") === "1");
         }
@@ -842,8 +955,15 @@ export default function MeetingDetailPage() {
     setSaving(true);
     setError(null);
     try {
-      const updated = await updateMeeting(meeting.meeting_id, { title, date, description });
-      setMeeting({ ...meeting, ...updated });
+      const updated = await updateMeeting(meeting.meeting_id, {
+        title,
+        date,
+        named_attendees: joinAttendeeList(attendeeNames),
+        description,
+      });
+      const detail = await fetchMeeting(meeting.meeting_id);
+      setMeeting({ ...meeting, ...updated, ...detail });
+      pollRef.current = isMatchingSpeakers(detail);
       setEditing(false);
       router.replace(`/meetings/${meeting.meeting_id}`);
       toast("Toplantı başarıyla kaydedildi");
@@ -871,6 +991,38 @@ export default function MeetingDetailPage() {
     }
   }
 
+  async function handleSpeakerGuess(name: string, action: "confirm" | "reject") {
+    if (!meeting) return;
+    const origin = meeting.transcript.find((line) => line.speaker === name)?.speaker_origin ?? null;
+    const confirmed = stripGuessMark(name);
+    setSpeakerBusy(true);
+    setError(null);
+    try {
+      const updated = await renameMeetingSpeaker(meeting.meeting_id, {
+        from_speaker: name,
+        action,
+      });
+      setMeeting({
+        ...meeting,
+        transcript: updated.transcript,
+        attendees: updated.attendees,
+        named_attendees: updated.named_attendees,
+        summary: updated.summary,
+        decisions: updated.decisions,
+        actions: updated.actions,
+      });
+      setActionItems(updated.actions.map((item) => ({ ...item })));
+      if (filterSpeaker === name) {
+        setFilterSpeaker(action === "confirm" ? confirmed : origin);
+      }
+      toast(action === "confirm" ? "Konuşmacı onaylandı" : "Konuşmacı etiketi kullanıldı");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Konuşmacı güncellenemedi");
+    } finally {
+      setSpeakerBusy(false);
+    }
+  }
+
   async function handleRenameSpeaker(body: { speaker: string; seq?: number; from_speaker?: string }) {
     if (!meeting) return;
     const speaker = body.speaker.trim();
@@ -882,7 +1034,7 @@ export default function MeetingDetailPage() {
         speaker,
         ...(body.seq != null ? { seq: body.seq } : { from_speaker: body.from_speaker }),
       });
-      setMeeting({ ...meeting, transcript: updated.transcript, attendees: updated.attendees });
+      setMeeting({ ...meeting, transcript: updated.transcript, attendees: updated.attendees, named_attendees: updated.named_attendees });
       setLineEdit(null);
       setBulkEdit(null);
       toast("Konuşmacı başarıyla güncellendi");
@@ -1090,9 +1242,13 @@ export default function MeetingDetailPage() {
     : splitTranscriptSentences(meeting.transcript);
   const usingOriginalLines = meeting.transcript.some((line) => line.speaker);
   const speakers = uniqueSpeakers(lines);
-  const attendeeValue = speakers.length
-    ? speakers.map((item) => item.name).join(", ")
-    : meeting.attendees;
+  const attendeeValue = (meeting.named_attendees || "").trim()
+    ? meeting.named_attendees
+    : speakers.length
+      ? speakers.map((item) => item.name).join(", ")
+      : meeting.attendees;
+  const matching = isMatchingSpeakers(meeting);
+  const analysisPending = pendingAnalysisCopy(meeting, analysisBusy);
   const visibleLines = lines.filter((line) => {
     if (filterSpeaker && line.speaker !== filterSpeaker) return false;
     return lineMatchesQuery(line, transcriptQuery);
@@ -1135,13 +1291,13 @@ export default function MeetingDetailPage() {
   function openLineEdit(seq: number, current: string) {
     setBulkEdit(null);
     setLineEdit({ seq, current });
-    setLineName(current);
+    setLineName(stripGuessMark(current) || current);
   }
 
   function openBulkEdit(name: string) {
     setLineEdit(null);
     setBulkEdit(name);
-    setBulkName(name);
+    setBulkName(stripGuessMark(name) || name);
   }
 
   return (
@@ -1165,6 +1321,14 @@ export default function MeetingDetailPage() {
                 />
               </label>
               <label className="flex flex-col gap-1.5 text-sm">
+                <span className="font-medium text-slate-700 dark:text-teal-200">Katılımcılar</span>
+                <AttendeeListEditor
+                  names={attendeeNames}
+                  onChange={setAttendeeNames}
+                  hint="İsmi yazıp Onayla’ya basın. Transkript hazır olunca bu isimler konuşmacılara eşlenir."
+                />
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm">
                 <span className="font-medium text-slate-700 dark:text-teal-200">Açıklama</span>
                 <textarea
                   rows={3}
@@ -1174,9 +1338,6 @@ export default function MeetingDetailPage() {
                   className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
                 />
               </label>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                Katılımcılar konuşmacılardan gelir. Bir konuşmacının adını değiştirince burada da güncellenir.
-              </p>
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -1215,7 +1376,7 @@ export default function MeetingDetailPage() {
                   ) : null}
                 </div>
                 <div className="flex items-center gap-2 pt-1">
-                  {meeting.status === "uploaded" || (meeting.status === "transcribed" && !meeting.summary) ? (
+                  {meeting.status === "uploaded" || matching || analysisBusy ? (
                     <span
                       className="h-4 w-4 animate-spin rounded-full border-2 border-amber-200 border-t-amber-500"
                       aria-hidden
@@ -1233,11 +1394,27 @@ export default function MeetingDetailPage() {
                 {meeting.transcript.length > 0 || meeting.status === "analyzed" || meeting.status === "transcribed" ? (
                   <button
                     type="button"
-                    disabled={analysisBusy || meeting.status === "uploaded"}
+                    disabled={analysisBusy || matching || meeting.status === "uploaded"}
                     onClick={() => void handleRetryAnalysis()}
                     className="h-9 cursor-pointer rounded-lg bg-teal-700 px-3.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-60"
                   >
-                    {analysisBusy ? "Analiz ediliyor…" : "Analizi yenile"}
+                    {matching
+                      ? "Konuşmacılar eşleniyor…"
+                      : analysisBusy
+                        ? analysisProgressLabel(meeting, true) || "Analiz ediliyor…"
+                        : meeting.summary
+                          ? "Analizi yenile"
+                          : "Analiz yap"}
+                  </button>
+                ) : null}
+                {meeting.status === "analyzed" ? (
+                  <button
+                    type="button"
+                    disabled={exporting}
+                    onClick={() => setExportOpen(true)}
+                    className="h-9 cursor-pointer rounded-lg border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-slate-200 dark:hover:bg-teal-900/40"
+                  >
+                    PDF indir
                   </button>
                 ) : null}
                 <button
@@ -1341,7 +1518,7 @@ export default function MeetingDetailPage() {
                 <input
                   value={transcriptQuery}
                   onChange={(e) => setTranscriptQuery(e.target.value)}
-                  placeholder="Transkriptte kelime ara…"
+                  placeholder="Mesaj metninde ara…"
                   className="h-10 w-full rounded-lg border border-slate-200 bg-white pr-20 pl-9 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50 dark:focus:border-teal-500"
                 />
                 {searchActive ? (
@@ -1396,6 +1573,10 @@ export default function MeetingDetailPage() {
                             editing={lineEdit?.seq === line.seq}
                             value={lineName}
                             busy={speakerBusy}
+                            pending={
+                              isGuessName(speaker) ||
+                              Boolean(line.speaker_origin && line.speaker !== line.speaker_origin)
+                            }
                             onOpen={openLineEdit}
                             onChange={setLineName}
                             onClose={() => setLineEdit(null)}
@@ -1403,6 +1584,8 @@ export default function MeetingDetailPage() {
                             onRenameAll={() =>
                               handleRenameSpeaker({ speaker: lineName, from_speaker: speaker })
                             }
+                            onConfirm={() => void handleSpeakerGuess(speaker, "confirm")}
+                            onReject={() => void handleSpeakerGuess(speaker, "reject")}
                           />
                         </span>
                       ) : null;
@@ -1471,6 +1654,7 @@ export default function MeetingDetailPage() {
                               seekTo(line.timestamp);
                             }}
                             onKeyDown={(event) => {
+                              if (isTypingTarget(event.target)) return;
                               if (event.key === "Enter" || event.key === " ") {
                                 event.preventDefault();
                                 seekTo(line.timestamp);
@@ -1605,6 +1789,7 @@ export default function MeetingDetailPage() {
                                   setFilterSpeaker((current) => (current === item.name ? null : item.name))
                                 }
                                 onKeyDown={(event) => {
+                                  if (isTypingTarget(event.target)) return;
                                   if (event.key === "Enter" || event.key === " ") {
                                     event.preventDefault();
                                     setFilterSpeaker((current) => (current === item.name ? null : item.name));
@@ -1617,7 +1802,14 @@ export default function MeetingDetailPage() {
                                 }`}
                               >
                                 <p className={`text-sm font-semibold ${active ? "text-teal-800 dark:text-teal-200" : "text-slate-800 dark:text-slate-200"}`}>
-                                  {item.name.replace(/\s*\?+\s*$/, "").trim() || item.name}
+                                  {item.name}
+                                  {item.pending ? (
+                                    <SpeakerGuessActions
+                                      busy={speakerBusy}
+                                      onConfirm={() => void handleSpeakerGuess(item.name, "confirm")}
+                                      onReject={() => void handleSpeakerGuess(item.name, "reject")}
+                                    />
+                                  ) : null}
                                 </p>
                                 <p className="mt-0.5 text-xs text-slate-400">{item.count} satır</p>
                                 <button
@@ -1655,16 +1847,20 @@ export default function MeetingDetailPage() {
                       .map((para) => para.trim())
                       .filter(Boolean)
                       .map((para, index) => {
-                        const heading = para.length <= 80 && !/[.!?…]$/.test(para);
+                        const heading = ["çerçeve", "gündem akışı", "sonuç"].includes(
+                          para.toLocaleLowerCase("tr-TR"),
+                        );
                         return heading ? (
                           <h3
                             key={index}
-                            className="pt-2 text-sm font-semibold tracking-tight text-slate-900 dark:text-teal-50"
+                            className="pt-5 text-[11px] font-semibold tracking-[0.16em] text-teal-800 uppercase first:pt-0 dark:text-teal-300"
                           >
                             {para}
                           </h3>
                         ) : (
-                          <p key={index}>{para}</p>
+                          <p key={index} className="text-sm leading-7">
+                            {para}
+                          </p>
                         );
                       })}
                   </div>
@@ -1680,10 +1876,12 @@ export default function MeetingDetailPage() {
                     Tekrar dene
                   </button>
                 </div>
-              ) : meeting.status === "transcribed" || meeting.status === "uploaded" ? (
-                <p className="text-sm text-slate-400">Analiz ediliyor…</p>
               ) : (
-                <p className="text-sm text-slate-400">Özet henüz yok.</p>
+                <p className="text-sm text-slate-400">
+                  {meeting.status === "transcribed" || meeting.status === "uploaded" || analysisBusy
+                    ? analysisPending
+                    : "Özet henüz yok."}
+                </p>
               )}
             </>
           )}
@@ -1713,6 +1911,7 @@ export default function MeetingDetailPage() {
                         tabIndex={0}
                         onClick={() => jumpToTranscript(line)}
                         onKeyDown={(event) => {
+                          if (isTypingTarget(event.target)) return;
                           if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
                             jumpToTranscript(line);
@@ -1736,8 +1935,8 @@ export default function MeetingDetailPage() {
               <p className="mb-4 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">Alınan kararlar</p>
               {decisionList.length === 0 ? (
                 <p className="text-sm text-slate-400">
-                  {meeting.status === "transcribed" || meeting.status === "uploaded"
-                    ? "Analiz ediliyor…"
+                  {meeting.status === "transcribed" || meeting.status === "uploaded" || analysisBusy
+                    ? analysisPending
                     : "Alınan karar yok."}
                 </p>
               ) : (
@@ -1751,6 +1950,7 @@ export default function MeetingDetailPage() {
                       tabIndex={0}
                       onClick={() => openDecision(item)}
                       onKeyDown={(e) => {
+                        if (isTypingTarget(e.target)) return;
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           openDecision(item);
@@ -1784,8 +1984,8 @@ export default function MeetingDetailPage() {
               </p>
               {actionItems.length === 0 ? (
                 <p className="text-sm text-slate-400">
-                  {meeting.status === "transcribed" || meeting.status === "uploaded"
-                    ? "Analiz ediliyor…"
+                  {meeting.status === "transcribed" || meeting.status === "uploaded" || analysisBusy
+                    ? analysisPending
                     : "Aksiyon maddesi yok."}
                 </p>
               ) : (
@@ -1798,7 +1998,7 @@ export default function MeetingDetailPage() {
                     })
                     .map((item) => {
                     const done = item.task_status === "done";
-                    const inProgress = item.task_status === "in_progress";
+                    const tone = done ? "ok" : dueTone(item.due_date);
                     const extra = item.notes.trim() && item.notes.trim() !== item.description.trim();
                     return (
                     <li
@@ -1807,6 +2007,7 @@ export default function MeetingDetailPage() {
                       tabIndex={0}
                       onClick={() => setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() })}
                       onKeyDown={(e) => {
+                        if (isTypingTarget(e.target)) return;
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() });
@@ -1815,9 +2016,13 @@ export default function MeetingDetailPage() {
                       className={`flex cursor-pointer flex-col gap-3 rounded-xl border p-4 shadow-sm transition-shadow sm:flex-row sm:items-center sm:justify-between ${
                         done
                           ? "border-emerald-200 bg-emerald-50 hover:border-emerald-400 hover:shadow-[0_0_18px_rgba(16,185,129,0.45)] dark:border-emerald-800/50 dark:bg-emerald-950/40"
-                          : inProgress
-                            ? "border-amber-200 bg-amber-50 hover:border-amber-400 hover:shadow-[0_0_18px_rgba(245,158,11,0.5)] dark:border-amber-800/50 dark:bg-amber-950/40"
-                            : "border-teal-200 bg-teal-50 hover:border-teal-400 hover:shadow-[0_0_18px_rgba(13,148,136,0.5)] dark:border-teal-800/50 dark:bg-teal-950/40"
+                          : !item.task_status
+                            ? "border-teal-200 bg-teal-50 hover:border-teal-400 hover:shadow-[0_0_18px_rgba(13,148,136,0.5)] dark:border-teal-800/50 dark:bg-teal-950/40"
+                            : tone === "overdue"
+                              ? "border-rose-400 bg-rose-50 hover:border-rose-500 hover:shadow-[0_0_18px_rgba(244,63,94,0.45)] dark:border-rose-700 dark:bg-rose-950/50"
+                              : tone === "soon"
+                                ? "border-amber-200 bg-amber-50 hover:border-amber-400 hover:shadow-[0_0_18px_rgba(245,158,11,0.5)] dark:border-amber-800/50 dark:bg-amber-950/40"
+                                : "border-sky-200 bg-sky-50 hover:border-sky-400 hover:shadow-[0_0_18px_rgba(14,165,233,0.5)] dark:border-sky-800/50 dark:bg-sky-950/40"
                       }`}
                     >
                       <div className="min-w-0 flex-1">
@@ -1884,6 +2089,25 @@ export default function MeetingDetailPage() {
         </div>
       </div>
 
+      <ExportMeetingDialog
+        open={exportOpen}
+        actions={actionItems}
+        exporting={exporting}
+        onClose={() => {
+          if (!exporting) setExportOpen(false);
+        }}
+        onConfirm={(options) => {
+          if (exporting) return;
+          setExporting(true);
+          void downloadMeetingReport(meeting, options)
+            .then(() => {
+              setExportOpen(false);
+              toast(options.transcript === "attach" ? "Tutanak ve transkript indirildi" : "PDF indirildi");
+            })
+            .catch(() => toast("PDF oluşturulamadı"))
+            .finally(() => setExporting(false));
+        }}
+      />
       {selected && (
         <div className="fixed inset-0 z-20 flex justify-end bg-slate-950/30">
           <button type="button" className="h-full flex-1 cursor-pointer" aria-label="Kapat" onClick={() => setSelected(null)} />
@@ -1909,7 +2133,7 @@ export default function MeetingDetailPage() {
               <label className="flex flex-col gap-1.5">
                 <span className="font-medium text-slate-700">Sorumlu</span>
                 <PersonPicker
-                  attendeeNames={speakers.map((item) => item.name)}
+                  attendeeNames={speakers.map((item) => stripGuessMark(item.name) || item.name)}
                   valueId={selected.assignee_id}
                   valueName={selected.assignee ?? ""}
                   onChange={(personId, name, note) => {

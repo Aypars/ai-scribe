@@ -10,7 +10,7 @@ const meetingStyles: Record<MeetingStatus, string> = {
 
 const meetingLabels: Record<MeetingStatus, string> = {
   uploaded: "Yazıya çevriliyor",
-  transcribed: "Analiz ediliyor",
+  transcribed: "Transkript hazır",
   analyzed: "Hazır",
   failed: "Başarısız",
 };

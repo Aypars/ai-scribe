@@ -93,6 +93,7 @@ export type Meeting = {
   status: MeetingStatus;
   duration: number | null;
   attendees: string | null;
+  named_attendees?: string | null;
   description: string | null;
   audio_path: string | null;
 };
@@ -200,7 +201,7 @@ export async function createMeeting(body: {
 
 export async function updateMeeting(
   id: number,
-  body: { title: string; date: string; attendees?: string; description?: string },
+  body: { title: string; date: string; attendees?: string; named_attendees?: string; description?: string },
 ): Promise<Meeting> {
   const response = await fetch(`${API_URL}/api/v1/meetings/${id}`, {
     method: "PATCH",

@@ -19,7 +19,22 @@ from app.core.config import settings
 from app.services.turkish import fix_sentence_i
 
 logger = logging.getLogger(__name__)
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 _SENTENCE_END = re.compile(r"[.!?…][\"')\]]*(?:\s+|$)")
+
+
+def _reload_env() -> None:
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_ENV_PATH, override=True)
+    except Exception:
+        return
+
+
+def _whisperx_model() -> str:
+    _reload_env()
+    return (os.getenv("WHISPERX_MODEL") or settings.whisperx_model or "large-v3").strip()
 
 
 def _split_sentence_segments(raw_segments: list[dict]) -> list[TranscriptSegment]:
@@ -319,20 +334,120 @@ def _speaker_label(raw: object) -> str | None:
     return value
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+(?=[A-ZÁÂÇĞİÖŞÜIÜ])")
+_ENDED = re.compile(r"[.!?…][\"')\]]*$")
+
+
+def _join_words(parts: list[str]) -> str:
+    out = ""
+    for part in parts:
+        token = str(part or "")
+        if out and not out.endswith(" ") and not token.startswith(" "):
+            out += " "
+        out += token
+    return re.sub(r"\s+", " ", out).strip()
+
+
+def _split_sentences(text: str) -> list[str]:
+    value = re.sub(r"\s+", " ", (text or "").strip())
+    if not value:
+        return []
+    parts = [part.strip() for part in _SENTENCE_SPLIT.split(value) if part.strip()]
+    return parts or [value]
+
+
+def _fill_word_speakers(speakers: list[str | None], seg_speaker: str | None) -> list[str | None]:
+    """Keep word-level labels. Never paint a word with the whole-chunk speaker
+    when any word already has a label — that is what tags an interruption as
+    the person who was already talking."""
+    if not any(speakers):
+        return [seg_speaker for _ in speakers]
+    filled: list[str | None] = []
+    n = len(speakers)
+    for i, speaker in enumerate(speakers):
+        if speaker:
+            filled.append(speaker)
+            continue
+        left = next((speakers[j] for j in range(i - 1, -1, -1) if speakers[j]), None)
+        right = next((speakers[j] for j in range(i + 1, n) if speakers[j]), None)
+        filled.append(left if left and left == right else None)
+    return filled
+
+
+def _group_words_by_speaker(item: dict) -> list[tuple[float, str, str | None]]:
+    text = str(item.get("text") or "").strip()
+    start = float(item.get("start") or 0)
+    seg_speaker = _speaker_label(item.get("speaker"))
+    words = item.get("words") or []
+    if not isinstance(words, list) or not words:
+        return [(start, text, seg_speaker)]
+
+    tokens: list[tuple[float, str]] = []
+    raw_speakers: list[str | None] = []
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        token = str(word.get("word") or word.get("text") or "")
+        if not token.strip():
+            continue
+        tokens.append((float(word.get("start") or start), token))
+        raw_speakers.append(_speaker_label(word.get("speaker")))
+    if not tokens:
+        return [(start, text, seg_speaker)]
+
+    speakers = _fill_word_speakers(raw_speakers, seg_speaker)
+    groups: list[tuple[float, str, str | None]] = []
+    current: list[str] = []
+    current_speaker = speakers[0]
+    current_start = tokens[0][0]
+    for (stamp, token), speaker in zip(tokens, speakers):
+        if speaker != current_speaker and current:
+            groups.append((current_start, _join_words(current), current_speaker))
+            current = [token]
+            current_speaker = speaker
+            current_start = stamp
+            continue
+        current.append(token)
+        current_speaker = speaker
+    if current:
+        groups.append((current_start, _join_words(current), current_speaker))
+    return groups or [(start, text, seg_speaker)]
+
+
+def _merge_broken_sentences(rows: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    merged: list[TranscriptSegment] = []
+    for row in rows:
+        text = (row.text or "").strip()
+        if not text:
+            continue
+        if (
+            merged
+            and merged[-1].speaker == row.speaker
+            and not _ENDED.search((merged[-1].text or "").strip())
+        ):
+            merged[-1].text = f"{merged[-1].text} {text}".strip()
+            continue
+        merged.append(
+            TranscriptSegment(timestamp=row.timestamp, text=text, speaker=row.speaker)
+        )
+    return merged
+
+
 def _segments_from_whisperx(raw_segments: list[dict]) -> list[TranscriptSegment]:
     segments: list[TranscriptSegment] = []
     for item in raw_segments:
-        text = str(item.get("text") or "").strip()
-        if not text:
+        if not isinstance(item, dict):
             continue
-        start = max(0, int(float(item.get("start") or 0)))
-        speaker = _speaker_label(item.get("speaker"))
-        if speaker is None:
-            words = item.get("words") or []
-            if words:
-                speaker = _speaker_label(words[0].get("speaker"))
-        segments.append(TranscriptSegment(timestamp=start, text=fix_sentence_i(text), speaker=speaker))
-    return segments
+        for stamp, text, speaker in _group_words_by_speaker(item):
+            for sentence in _split_sentences(text):
+                segments.append(
+                    TranscriptSegment(
+                        timestamp=max(0, int(stamp)),
+                        text=fix_sentence_i(sentence),
+                        speaker=speaker,
+                    )
+                )
+    return _merge_broken_sentences(segments)
 
 
 def _tool_env() -> dict[str, str]:
@@ -377,7 +492,22 @@ def _append_language_and_task(cmd: list[str]) -> None:
         cmd.extend(["--language", language])
 
 
-def _whisperx_cmd(audio_path: Path, out_dir: Path) -> list[str]:
+def _asr_hints(names: list[str] | None) -> tuple[str, str]:
+    clean = [name.strip() for name in (names or []) if name and name.strip()][:24]
+    prompt = "Türkçe resmi toplantı. Kabul edildi, oy birliği, sevk, buyurun."
+    if clean:
+        prompt += " Katılımcılar: " + ", ".join(clean) + "."
+    return prompt, ", ".join(clean)
+
+
+def _whisperx_cmd(
+    audio_path: Path,
+    out_dir: Path,
+    *,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    hint_names: list[str] | None = None,
+) -> list[str]:
     whisperx = _find_whisperx()
     if whisperx is None:
         raise TranscriptionError("whisperx bulunamadı. Masaüstündeki whisperx-env ortamını kurun.")
@@ -385,16 +515,30 @@ def _whisperx_cmd(audio_path: Path, out_dir: Path) -> list[str]:
         str(whisperx),
         str(audio_path),
         "--model",
-        settings.whisperx_model,
+        _whisperx_model(),
         "--batch_size",
         str(settings.whisperx_batch_size),
+        "--beam_size",
+        "5",
+        "--condition_on_previous_text",
+        "False",
+        "--chunk_size",
+        "10",
         "--output_format",
         "json",
         "--output_dir",
         str(out_dir),
     ]
+    prompt, hotwords = _asr_hints(hint_names)
+    cmd.extend(["--initial_prompt", prompt])
+    if hotwords:
+        cmd.extend(["--hotwords", hotwords])
     if settings.hf_token.strip():
         cmd.extend(["--diarize", "--hf_token", settings.hf_token.strip()])
+        low = max(2, min_speakers or 2)
+        high = max(low, max_speakers or 12)
+        high = min(18, high)
+        cmd.extend(["--min_speakers", str(low), "--max_speakers", str(high)])
     _append_language_and_task(cmd)
     return cmd
 
@@ -470,6 +614,9 @@ def transcribe_audio(
     audio_path: Path,
     on_progress: Callable[[int, str], None] | None = None,
     meeting_id: int | None = None,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    hint_names: list[str] | None = None,
 ) -> TranscriptResult:
     if _is_cancelled(meeting_id):
         raise TranscriptionCancelled("Yazıya çevirme iptal edildi")
@@ -489,7 +636,17 @@ def transcribe_audio(
 
     with tempfile.TemporaryDirectory(prefix="whisper-") as tmp:
         out_dir = Path(tmp)
-        cmd = _whisperx_cmd(audio_path, out_dir) if use_whisperx else _whisper_cmd(audio_path, out_dir)
+        cmd = (
+            _whisperx_cmd(
+                audio_path,
+                out_dir,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
+                hint_names=hint_names,
+            )
+            if use_whisperx
+            else _whisper_cmd(audio_path, out_dir)
+        )
         logger.warning("Transcription starting with %s", Path(cmd[0]).name)
         returncode = 1
         try:

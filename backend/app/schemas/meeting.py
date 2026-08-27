@@ -31,6 +31,7 @@ class MeetingOut(BaseModel):
     status: str
     duration: int | None
     attendees: str | None
+    named_attendees: str | None = None
     description: str | None = None
     audio_path: str | None
 
@@ -92,6 +93,7 @@ class MeetingUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     date: str | None = None
     attendees: str | None = None
+    named_attendees: str | None = None
     description: str | None = Field(default=None, max_length=4000)
     analyze: bool = False
     dismiss_action: int | None = None
@@ -100,7 +102,7 @@ class MeetingUpdate(BaseModel):
 
 
 class SpeakerRenameIn(BaseModel):
-    speaker: str | None = Field(default=None, max_length=64)
+    speaker: str | None = Field(default=None, max_length=128)
     seq: int | None = None
-    from_speaker: str | None = Field(default=None, max_length=64)
+    from_speaker: str | None = Field(default=None, max_length=128)
     action: Literal["confirm", "reject"] | None = None

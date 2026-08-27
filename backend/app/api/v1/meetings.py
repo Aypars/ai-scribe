@@ -51,9 +51,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 _running: set[int] = set()
 _analyzing: set[int] = set()
+_matching: set[int] = set()
 _analysis_failed: dict[int, str] = {}
 _analysis_retry_at: dict[int, float] = {}
 _analysis_message: dict[int, str] = {}
+_matching_message: dict[int, str] = {}
 _running_lock = threading.Lock()
 
 
@@ -87,8 +89,14 @@ def _progress_out(meeting: Meeting) -> TranscriptionProgressOut | None:
             message=_analysis_message.get(meeting.meeting_id) or "Analiz ediliyor…",
             elapsed_seconds=0,
         )
+    if meeting.meeting_id in _matching:
+        return TranscriptionProgressOut(
+            progress=85,
+            message=_matching_message.get(meeting.meeting_id) or "Konuşmacılar eşleniyor…",
+            elapsed_seconds=0,
+        )
     if meeting.status == "transcribed":
-        err = _analysis_failed.get(meeting.meeting_id)
+        err = _analysis_failed.get(meeting.meeting_id) or (meeting.analysis_error or "").strip() or None
         if err:
             return TranscriptionProgressOut(
                 progress=100, message="Analiz başarısız", error=err, elapsed_seconds=0
@@ -163,7 +171,8 @@ def _detail_out(db: Session, meeting: Meeting) -> MeetingDetailOut:
         date=meeting.date,
         status=meeting.status,
         duration=meeting.duration,
-        attendees=meetings_repo.attendees_from_speakers(meeting.transcripts) or meeting.attendees,
+        attendees=meetings_repo.display_attendees(meeting, meeting.transcripts),
+        named_attendees=meeting.named_attendees,
         description=meeting.description,
         audio_path=meeting.audio_path,
         transcript=[
@@ -200,10 +209,12 @@ def transcribe_meeting_job(meeting_id: int) -> None:
     start_job(meeting_id)
     path = None
     db = SessionLocal()
+    named_attendees = None
     try:
         meeting = db.get(Meeting, meeting_id)
         if meeting is not None and meeting.audio_path:
             path = absolute_audio_path(meeting.audio_path)
+            named_attendees = meeting.named_attendees
         else:
             fail_job(meeting_id, "Toplantı veya ses dosyası bulunamadı")
     finally:
@@ -217,12 +228,19 @@ def transcribe_meeting_job(meeting_id: int) -> None:
     db = None
     try:
         logger.warning("Whisper job started for meeting %s (%s)", meeting_id, path)
+        from app.services.speakers import parse_named_attendees
+
+        names = parse_named_attendees(named_attendees)
+        named_count = len(names)
         result = transcribe_audio(
             path,
             on_progress=lambda progress, message: update_job(
                 meeting_id, progress=progress, message=message
             ),
             meeting_id=meeting_id,
+            min_speakers=2,
+            max_speakers=max(8, named_count + 4) if named_count else 12,
+            hint_names=names,
         )
         db = SessionLocal()
         meeting = db.get(Meeting, meeting_id)
@@ -232,7 +250,7 @@ def transcribe_meeting_job(meeting_id: int) -> None:
         meetings_repo.replace_transcript(db, meeting, result.segments, result.duration_seconds)
         meeting = meetings_repo.get_for_user(db, meeting.user_id, meeting_id) or meeting
         logger.warning("Whisper job finished for meeting %s", meeting_id)
-        _run_analysis(db, meeting)
+        _run_speaker_match(db, meeting)
         finish_job(meeting_id)
     except TranscriptionCancelled:
         logger.warning("Whisper cancelled for meeting %s", meeting_id)
@@ -272,6 +290,14 @@ def schedule_transcription(meeting_id: int) -> None:
     ).start()
 
 
+def _persist_analysis_error(db: Session, user_id: int, meeting_id: int, error: str) -> None:
+    meeting = meetings_repo.get_for_user(db, user_id, meeting_id)
+    if meeting is None:
+        return
+    meeting.analysis_error = error[:1000]
+    db.commit()
+
+
 def _run_analysis(db: Session, meeting: Meeting) -> None:
     if not meeting.transcripts:
         return
@@ -283,6 +309,7 @@ def _run_analysis(db: Session, meeting: Meeting) -> None:
     lines = list(meeting.transcripts)
     title = meeting.title
     attendees = meetings_repo.attendees_from_speakers(meeting.transcripts) or meeting.attendees
+    named_attendees = meeting.named_attendees
     meeting_date = meeting.date.isoformat() if meeting.date else None
     description = meeting.description
     meeting_id = meeting.meeting_id
@@ -295,26 +322,102 @@ def _run_analysis(db: Session, meeting: Meeting) -> None:
             attendees=attendees,
             meeting_date=meeting_date,
             description=description,
+            named_attendees=named_attendees,
             on_busy=lambda wait: _analysis_message.__setitem__(
                 meeting_id, f"Gemini yoğun, {wait} sn sonra tekrar…"
             ),
+            on_progress=lambda msg: _analysis_message.__setitem__(meeting_id, msg),
         )
         meeting = meetings_repo.get_for_user(db, user_id, meeting_id) or meeting
         meetings_repo.replace_analysis(db, meeting, result)
-        logger.warning("Gemini analysis finished for meeting %s", meeting_id)
+        logger.warning("Analysis finished for meeting %s", meeting_id)
     except AnalysisError as exc:
-        logger.exception("Gemini analysis failed for meeting %s", meeting.meeting_id)
-        _analysis_failed[meeting.meeting_id] = str(exc)
+        logger.exception("Analysis failed for meeting %s", meeting_id)
+        _analysis_failed[meeting_id] = str(exc)
+        _persist_analysis_error(db, user_id, meeting_id, str(exc))
         if _is_transient_gemini(str(exc)):
-            _analysis_retry_at[meeting.meeting_id] = time.time() + 20
-        return
+            _analysis_retry_at[meeting_id] = time.time() + 20
     except Exception as exc:
-        logger.exception("Gemini analysis failed for meeting %s", meeting.meeting_id)
-        _analysis_failed[meeting.meeting_id] = str(exc) or "Analiz başarısız"
-        return
+        logger.exception("Analysis failed for meeting %s", meeting_id)
+        message = str(exc) or "Analiz başarısız"
+        _analysis_failed[meeting_id] = message
+        _persist_analysis_error(db, user_id, meeting_id, message)
     finally:
-        _analyzing.discard(meeting.meeting_id)
-        _analysis_message.pop(meeting.meeting_id, None)
+        _analyzing.discard(meeting_id)
+        _analysis_message.pop(meeting_id, None)
+        finish_job(meeting_id)
+
+
+def _run_speaker_match(db: Session, meeting: Meeting) -> None:
+    if meeting.speakers_matched:
+        return
+    if not meeting.transcripts:
+        meeting.speakers_matched = True
+        db.commit()
+        return
+    meeting_id = meeting.meeting_id
+    user_id = meeting.user_id
+    _matching.add(meeting_id)
+    _matching_message[meeting_id] = "Konuşmacılar eşleniyor…"
+    update_job(meeting_id, progress=85, message="Konuşmacılar eşleniyor…")
+    lines = list(meeting.transcripts)
+    title = meeting.title
+    named_attendees = meeting.named_attendees
+    db.commit()
+    try:
+        from app.services.speakers import parse_named_attendees, resolve_speaker_map
+
+        mapping = resolve_speaker_map(
+            lines,
+            title=title,
+            names=parse_named_attendees(named_attendees),
+        )
+        meeting = meetings_repo.get_for_user(db, user_id, meeting_id) or meeting
+        if mapping:
+            meetings_repo.apply_speaker_map(db, meeting, mapping)
+            meeting = meetings_repo.get_for_user(db, user_id, meeting_id) or meeting
+        meeting.speakers_matched = True
+        db.commit()
+        logger.warning("Speaker match finished for meeting %s (%s names)", meeting_id, len(mapping))
+    except Exception:
+        logger.exception("Speaker match failed for meeting %s", meeting_id)
+        meeting = meetings_repo.get_for_user(db, user_id, meeting_id) or meeting
+        if meeting is not None:
+            meeting.speakers_matched = True
+            db.commit()
+    finally:
+        _matching.discard(meeting_id)
+        _matching_message.pop(meeting_id, None)
+
+
+def match_speakers_job(meeting_id: int) -> None:
+    db = SessionLocal()
+    try:
+        meeting = db.get(Meeting, meeting_id)
+        if meeting is None:
+            return
+        meeting = meetings_repo.get_for_user(db, meeting.user_id, meeting_id)
+        if meeting is None or meeting.speakers_matched:
+            return
+        _run_speaker_match(db, meeting)
+    finally:
+        db.close()
+        with _running_lock:
+            _matching.discard(meeting_id)
+        _matching_message.pop(meeting_id, None)
+
+
+def schedule_speaker_match(meeting_id: int) -> None:
+    with _running_lock:
+        if meeting_id in _matching or meeting_id in _running or meeting_id in _analyzing:
+            return
+        _matching.add(meeting_id)
+    threading.Thread(
+        target=match_speakers_job,
+        args=(meeting_id,),
+        name=f"speakers-{meeting_id}",
+        daemon=True,
+    ).start()
 
 
 def analyze_meeting_job(meeting_id: int) -> None:
@@ -335,7 +438,7 @@ def analyze_meeting_job(meeting_id: int) -> None:
 
 def schedule_analysis(meeting_id: int) -> None:
     with _running_lock:
-        if meeting_id in _analyzing or meeting_id in _running:
+        if meeting_id in _analyzing or meeting_id in _running or meeting_id in _matching:
             return
         failed = _analysis_failed.get(meeting_id)
         if failed:
@@ -370,6 +473,8 @@ def retry_analysis(
         )
     _analysis_failed.pop(meeting_id, None)
     _analysis_retry_at.pop(meeting_id, None)
+    meeting.analysis_error = None
+    db.commit()
     schedule_analysis(meeting_id)
     return _detail_out(db, meeting)
 
@@ -380,7 +485,14 @@ def list_meetings(
     current_user: User = Depends(get_current_user),
 ) -> MeetingListOut:
     items = meetings_repo.list_for_user(db, current_user.user_id)
-    return MeetingListOut(items=[MeetingOut.model_validate(item) for item in items])
+    return MeetingListOut(
+        items=[
+            MeetingOut.model_validate(item).model_copy(
+                update={"attendees": meetings_repo.display_attendees(item)}
+            )
+            for item in items
+        ]
+    )
 
 
 @router.post("", response_model=MeetingOut, status_code=status.HTTP_201_CREATED)
@@ -403,12 +515,14 @@ async def create_meeting(
     except StorageError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    named = attendees.strip() or None
     meeting = meetings_repo.create_meeting(
         db,
         user_id=current_user.user_id,
         title=title.strip(),
         date=_reject_future_meeting(_parse_date(date)),
-        attendees=attendees.strip() or None,
+        attendees=named,
+        named_attendees=named,
         description=description.strip() or None,
         audio_path=audio_path,
     )
@@ -512,15 +626,15 @@ def get_meeting(
     meeting = meetings_repo.get_for_user(db, current_user.user_id, meeting_id)
     if meeting is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toplantı bulunamadı")
-    joined = meetings_repo.attendees_from_speakers(meeting.transcripts)
-    if joined and meeting.attendees != joined:
-        meeting.attendees = joined
-        db.commit()
     job = get_job(meeting.meeting_id)
     if meeting.status == "uploaded" and (job is None or job.state != "running"):
         schedule_transcription(meeting.meeting_id)
     elif meeting.status == "transcribed":
-        schedule_analysis(meeting.meeting_id)
+        persisted = (meeting.analysis_error or "").strip()
+        if persisted:
+            _analysis_failed.setdefault(meeting.meeting_id, persisted)
+        if not meeting.speakers_matched:
+            schedule_speaker_match(meeting.meeting_id)
     return _detail_out(db, meeting)
 
 
@@ -537,8 +651,11 @@ def update_meeting(
 
     title = body.title.strip() if body.title is not None else None
     parsed_date = _reject_future_meeting(_parse_date(body.date)) if body.date else None
-    attendees_set = False
-    attendees = None
+    named_set = "named_attendees" in body.model_fields_set or "attendees" in body.model_fields_set
+    named = None
+    if named_set:
+        raw = body.named_attendees if "named_attendees" in body.model_fields_set else body.attendees
+        named = (raw or "").strip() or None
     description_set = "description" in body.model_fields_set
     description = (body.description or "").strip() or None if description_set else None
 
@@ -547,11 +664,13 @@ def update_meeting(
         meeting,
         title=title,
         date=parsed_date,
-        attendees=attendees,
-        attendees_set=attendees_set,
+        named_attendees=named,
+        named_attendees_set=named_set,
         description=description,
         description_set=description_set,
     )
+    if named_set and meeting.status in {"transcribed", "analyzed"}:
+        schedule_speaker_match(meeting_id)
     if body.dismiss_action is not None:
         if not meetings_repo.dismiss_action(db, meeting, body.dismiss_action):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aksiyon bulunamadı")
@@ -605,6 +724,9 @@ def update_meeting(
                 detail="Analiz için önce transkript gerekir",
             )
         _analysis_failed.pop(meeting_id, None)
+        _analysis_retry_at.pop(meeting_id, None)
+        meeting.analysis_error = None
+        db.commit()
         schedule_analysis(meeting_id)
     return MeetingOut.model_validate(meeting)
 

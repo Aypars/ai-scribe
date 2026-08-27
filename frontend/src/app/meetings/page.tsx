@@ -14,7 +14,7 @@ import { formatDay, formatDuration } from "@/lib/demo-data";
 const filters: { value: "all" | MeetingStatus; label: string }[] = [
   { value: "all", label: "Tümü" },
   { value: "uploaded", label: "Yazıya çevriliyor" },
-  { value: "transcribed", label: "Analiz ediliyor" },
+  { value: "transcribed", label: "Transkript hazır" },
   { value: "analyzed", label: "Hazır" },
   { value: "failed", label: "Başarısız" },
 ];

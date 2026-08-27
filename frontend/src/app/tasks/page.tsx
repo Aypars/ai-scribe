@@ -25,6 +25,7 @@ import { PersonPicker, splitAttendeeNames } from "@/components/PersonPicker";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 import { byDueDate, countDueAlerts, dateOnly, dueTone, todayISO } from "@/lib/demo-data";
+import { downloadOpenTasksReport } from "@/lib/export-lists";
 
 const columns: { id: TaskStatus; title: string; titleClass: string; check: string }[] = [
   {
@@ -85,6 +86,7 @@ export default function TasksPage() {
   const [selectedNote, setSelectedNote] = useState("");
   const [boardView, setBoardView] = useState<"suggestions" | TaskStatus>("suggestions");
   const [boardLayout, setBoardLayout] = useState<"focus" | "board">("focus");
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -401,19 +403,64 @@ export default function TasksPage() {
 
   const filterActive = meetingFilter !== "all" || personFilter !== "all" || query.trim().length > 0;
 
+  async function exportOpenTasks() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const personName =
+        personFilter === "all"
+          ? null
+          : people.find((person) => person.person_id === personFilter)?.label ||
+            people.find((person) => person.person_id === personFilter)?.name ||
+            null;
+      const meetingName =
+        meetingFilter === "all"
+          ? null
+          : meetings.find((meeting) => meeting.meeting_id === meetingFilter)?.title || null;
+      const subtitle = [
+        meetingName ? `Toplantı: ${meetingName}` : null,
+        personName ? `Kişi: ${personName}` : null,
+        query.trim() ? `Arama: ${query.trim()}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      await downloadOpenTasksReport({
+        title: personName ? `${personName} açık görevler` : "Açık görevler",
+        subtitle,
+        tasks: grouped.in_progress,
+        showAssignee: personFilter === "all",
+      });
+      toast("PDF indirildi");
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "PDF hazırlanamadı");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <AppShell
       title="Görev panosu"
       action={
-        <button
-          type="button"
-          onClick={() => {
-            setCreating(true);
-          }}
-          className="h-10 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800"
-        >
-          + Görev
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={exporting}
+            onClick={() => void exportOpenTasks()}
+            className="h-10 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-slate-200 dark:hover:bg-teal-900/40"
+          >
+            {exporting ? "Hazırlanıyor…" : "PDF indir"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setCreating(true);
+            }}
+            className="h-10 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800"
+          >
+            + Görev
+          </button>
+        </div>
       }
     >
       {error ? <p className="mb-4 text-sm text-rose-600">{error}</p> : null}
