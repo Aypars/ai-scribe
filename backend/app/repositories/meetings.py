@@ -533,22 +533,19 @@ def update_action(
     if description is not None:
         action.description = description
     if assignee_set:
-        task = db.get(Task, (meeting.meeting_id, seq))
-        if task is None:
-            action.assignee = (assignee or "").strip() or None
-            action.assignee_id = None
-        else:
-            from app.repositories import people as people_repo
+        from app.repositories import people as people_repo
 
-            name, person_id = people_repo.resolve_assignee(
-                db,
-                user_id=meeting.user_id,
-                meeting=meeting,
-                assignee_id=assignee_id,
-                assignee_name=assignee,
-            )
-            action.assignee = name
-            action.assignee_id = person_id
+        name, person_id = people_repo.resolve_assignee(
+            db,
+            user_id=meeting.user_id,
+            meeting=meeting,
+            assignee_id=assignee_id,
+            assignee_name=assignee,
+        )
+        action.assignee = name
+        action.assignee_id = person_id
+        task = db.get(Task, (meeting.meeting_id, seq))
+        if task is not None:
             task.assignee = name
             task.assignee_id = person_id
     if due_date_set:

@@ -11,7 +11,6 @@ type Mode = "login" | "register";
 export function LoginForm() {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("login");
-  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -28,7 +27,7 @@ export function LoginForm() {
     try {
       const data =
         mode === "register"
-          ? await registerUser({ name, email, password })
+          ? await registerUser({ email, password })
           : await loginUser({ email, password });
       setSession(data);
       router.push("/");
@@ -71,22 +70,6 @@ export function LoginForm() {
           Kayıt ol
         </button>
       </div>
-
-      {mode === "register" && (
-        <label className="flex flex-col gap-1.5 text-sm">
-          <span className="font-medium text-slate-700 dark:text-slate-300">Ad soyad</span>
-          <input
-            type="text"
-            name="name"
-            autoComplete="name"
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-900 outline-none ring-teal-600/20 placeholder:text-slate-400 focus:border-teal-600 focus:ring-4 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50 dark:focus:border-teal-500"
-            placeholder="Ayşe Yılmaz"
-          />
-        </label>
-      )}
 
       <label className="flex flex-col gap-1.5 text-sm">
           <span className="font-medium text-slate-700 dark:text-slate-300">E-posta</span>

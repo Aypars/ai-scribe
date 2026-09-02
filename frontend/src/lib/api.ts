@@ -4,7 +4,6 @@ const TOKEN_KEY = "access_token";
 
 export type AuthUser = {
   user_id: number;
-  name: string;
   email: string;
 };
 
@@ -40,7 +39,6 @@ async function readError(response: Response): Promise<string> {
 }
 
 export async function registerUser(body: {
-  name: string;
   email: string;
   password: string;
 }): Promise<TokenResponse> {
@@ -89,16 +87,6 @@ export async function resetPassword(body: { token: string; password: string }): 
 export async function fetchMe(token: string): Promise<AuthUser> {
   const response = await fetch(`${API_URL}/api/v1/auth/me`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!response.ok) throw new Error(await readError(response));
-  return response.json();
-}
-
-export async function updateProfile(name: string): Promise<AuthUser> {
-  const response = await fetch(`${API_URL}/api/v1/auth/me`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json", ...authHeader() },
-    body: JSON.stringify({ name }),
   });
   if (!response.ok) throw new Error(await readError(response));
   return response.json();
@@ -343,6 +331,28 @@ export async function analyzeMeeting(id: number): Promise<MeetingDetail> {
   const response = await fetch(`${API_URL}/api/v1/meetings/${id}/analyze`, {
     method: "POST",
     headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
+export type AskCite = {
+  seq: number;
+  timestamp: number;
+  speaker: string | null;
+  text: string;
+};
+
+export type AskResult = {
+  answer: string;
+  cites: AskCite[];
+};
+
+export async function askMeeting(id: number, question: string): Promise<AskResult> {
+  const response = await fetch(`${API_URL}/api/v1/meetings/${id}/ask`, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
   });
   if (!response.ok) throw new Error(await readError(response));
   return response.json();

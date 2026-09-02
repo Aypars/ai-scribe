@@ -23,6 +23,7 @@ frontend/build/
 # Uploads & local data
 backend/uploads/*
 !backend/uploads/.gitkeep
+downloads/
 
 # IDE / OS
 .idea/

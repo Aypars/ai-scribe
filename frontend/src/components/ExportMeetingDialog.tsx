@@ -13,6 +13,7 @@ type Props = {
   exporting: boolean;
   onClose: () => void;
   onConfirm: (options: MeetingExportOptions) => void;
+  onPreview: (options: MeetingExportOptions) => Promise<Blob>;
 };
 
 const transcriptChoices: { id: TranscriptMode; title: string; hint: string }[] = [
@@ -21,31 +22,69 @@ const transcriptChoices: { id: TranscriptMode; title: string; hint: string }[] =
   { id: "omit", title: "Transkript olmasın", hint: "Tutanağa transkript eklenmez." },
 ];
 
-export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfirm }: Props) {
+export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfirm, onPreview }: Props) {
   const [transcript, setTranscript] = useState<TranscriptMode>("include");
   const [format, setFormat] = useState<ExportFormat>("pdf");
   const [selected, setSelected] = useState<number[]>([]);
   const [talkShare, setTalkShare] = useState(true);
+  const [notes, setNotes] = useState("");
+  const [previewing, setPreviewing] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  function currentOptions(): MeetingExportOptions {
+    return {
+      format,
+      transcript,
+      actionSeqs: selected,
+      talkShare: transcript === "include" && talkShare,
+      notes,
+    };
+  }
+
+  function clearPreview() {
+    setPreviewUrl((url) => {
+      if (url) URL.revokeObjectURL(url);
+      return null;
+    });
+  }
 
   useEffect(() => {
     if (!open) return;
     setTranscript("include");
     setFormat("pdf");
     setTalkShare(true);
+    setNotes("");
+    setPreviewing(false);
     setSelected(actions.map((item) => item.seq));
     // Snapshot at open; don't reset if the meeting poll refreshes the list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   useEffect(() => {
+    if (open) return;
+    clearPreview();
+    setPreviewing(false);
+  }, [open]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
+  useEffect(() => {
     if (!open) return;
     function onKey(event: KeyboardEvent) {
-      if (event.key !== "Escape" || exporting) return;
+      if (event.key !== "Escape" || exporting || previewing) return;
+      if (previewUrl) {
+        clearPreview();
+        return;
+      }
       onClose();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, exporting, onClose]);
+  }, [open, exporting, previewing, previewUrl, onClose]);
 
   if (!open) return null;
 
@@ -53,11 +92,13 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
     setSelected((prev) => (prev.includes(seq) ? prev.filter((id) => id !== seq) : [...prev, seq]));
   }
 
+  const busy = exporting || previewing;
+
   return (
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/55 p-4"
       onClick={() => {
-        if (!exporting) onClose();
+        if (!busy) onClose();
       }}
     >
       <div
@@ -70,7 +111,6 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
         <h2 id="export-title" className="text-lg font-semibold text-slate-900 dark:text-teal-50">
           Dışa aktar
         </h2>
-        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Biçimi ve tutanağa nelerin gireceğini seç.</p>
 
         <h3 className="mt-5 text-xs font-semibold tracking-[0.14em] text-teal-700 uppercase dark:text-teal-300">
           Biçim
@@ -115,21 +155,26 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
         </div>
 
         {transcript === "include" ? (
-          <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 px-3 py-2.5 hover:bg-slate-50 dark:border-teal-800 dark:hover:bg-teal-950/40">
+          <label className="mt-3 flex cursor-pointer items-center gap-3 rounded-xl border border-slate-200 px-3 py-2.5 hover:bg-slate-50 dark:border-teal-800 dark:hover:bg-teal-950/40">
             <input
               type="checkbox"
-              className="mt-1 accent-teal-700"
+              className="accent-teal-700"
               checked={talkShare}
               onChange={() => setTalkShare((prev) => !prev)}
             />
-            <span>
-              <span className="block text-sm font-medium text-slate-800 dark:text-teal-50">Konuşma payı eklensin</span>
-              <span className="mt-0.5 block text-xs leading-5 text-slate-500 dark:text-slate-400">
-                Kim ne kadar konuştu, transkriptin hemen üstünde yer alır.
-              </span>
-            </span>
+            <span className="text-sm font-medium text-slate-800 dark:text-teal-50">Konuşma payı eklensin</span>
           </label>
         ) : null}
+
+        <h3 className="mt-5 text-xs font-semibold tracking-[0.14em] text-teal-700 uppercase dark:text-teal-300">
+          Not <span className="font-medium tracking-normal normal-case text-slate-400">isteğe bağlı</span>
+        </h3>
+        <textarea
+          value={notes}
+          onChange={(event) => setNotes(event.target.value)}
+          rows={3}
+          className="mt-2 w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-teal-600 dark:border-teal-800 dark:bg-[#0c1c1a] dark:text-teal-50"
+        />
 
         <div className="mt-5 flex items-center justify-between gap-3">
           <h3 className="text-xs font-semibold tracking-[0.14em] text-teal-700 uppercase dark:text-teal-300">
@@ -173,10 +218,10 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
           <p className="mt-2 text-sm text-slate-500">Aksiyon maddesi yok.</p>
         )}
 
-        <div className="mt-6 flex justify-end gap-3">
+        <div className="mt-6 flex flex-wrap justify-end gap-3">
           <button
             type="button"
-            disabled={exporting}
+            disabled={busy}
             onClick={onClose}
             className="h-11 cursor-pointer rounded-lg border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-teal-800 dark:text-teal-100 dark:hover:bg-teal-950/60"
           >
@@ -184,21 +229,58 @@ export function ExportMeetingDialog({ open, actions, exporting, onClose, onConfi
           </button>
           <button
             type="button"
-            disabled={exporting}
-            onClick={() =>
-              onConfirm({
-                format,
-                transcript,
-                actionSeqs: selected,
-                talkShare: transcript === "include" && talkShare,
-              })
-            }
+            disabled={busy}
+            onClick={() => {
+              setPreviewing(true);
+              void onPreview(currentOptions())
+                .then((blob) => {
+                  clearPreview();
+                  setPreviewUrl(URL.createObjectURL(blob));
+                })
+                .catch(() => {})
+                .finally(() => setPreviewing(false));
+            }}
+            className="h-11 cursor-pointer rounded-lg border border-teal-700 px-4 text-sm font-semibold text-teal-800 hover:bg-teal-50 disabled:opacity-60 dark:border-teal-400 dark:text-teal-100 dark:hover:bg-teal-950/60"
+          >
+            {previewing ? "Hazırlanıyor…" : "Önizle"}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onConfirm(currentOptions())}
             className="h-11 cursor-pointer rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-60"
           >
             {exporting ? "Hazırlanıyor…" : "Dışa aktar"}
           </button>
         </div>
       </div>
+
+      {previewUrl ? (
+        <div
+          className="fixed inset-0 z-[90] flex flex-col bg-slate-950/80 p-4"
+          onClick={(event) => {
+            event.stopPropagation();
+            clearPreview();
+          }}
+        >
+          <div
+            className="mx-auto flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl dark:bg-[#0f2220]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-teal-800">
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-teal-50">Önizleme</h3>
+              <button
+                type="button"
+                onClick={clearPreview}
+                className="h-10 cursor-pointer rounded-lg border border-slate-200 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-teal-800 dark:text-teal-100 dark:hover:bg-teal-950/60"
+              >
+                Kapat
+              </button>
+            </div>
+            <iframe title="Rapor önizlemesi" src={previewUrl} className="min-h-0 flex-1 bg-slate-100" />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

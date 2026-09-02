@@ -174,8 +174,8 @@ export default function MeetingsPage() {
                       {meeting.description}
                     </p>
                   ) : null}
-                  <p className="truncate text-xs text-slate-400" title={meeting.attendees || undefined}>
-                    {meeting.attendees || "Katılımcı belirtilmedi"}
+                  <p className="truncate text-xs text-slate-400" title={(meeting.named_attendees || meeting.attendees) || undefined}>
+                    {(meeting.named_attendees || meeting.attendees) || "Katılımcı belirtilmedi"}
                   </p>
                 </td>
                 <td className="w-px whitespace-nowrap px-5 py-4 text-slate-500">{formatDay(meeting.date)}</td>

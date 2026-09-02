@@ -134,7 +134,8 @@ export default function TasksPage() {
   }
 
   function attendeesFor(meetingId: number): string[] {
-    return splitAttendeeNames(meetings.find((row) => row.meeting_id === meetingId)?.attendees);
+    const meeting = meetings.find((row) => row.meeting_id === meetingId);
+    return splitAttendeeNames(meeting?.named_attendees || meeting?.attendees);
   }
 
   function rememberPerson(personId: number | null, name: string) {
@@ -362,18 +363,22 @@ export default function TasksPage() {
     setSaving(true);
     setError(null);
     try {
-      const name = (selectedSuggestion.assignee ?? "").trim() || null;
+      const assigned = await ensurePerson(
+        selectedSuggestion.assignee_id,
+        selectedSuggestion.assignee ?? "",
+        convertNote,
+      );
       await updateMeetingAction(selectedSuggestion.meeting_id, {
         seq: selectedSuggestion.action_seq,
         description: selectedSuggestion.title.trim() || selectedSuggestion.description,
-        assignee: name,
-        assignee_id: null,
+        assignee: assigned.assignee || null,
+        assignee_id: assigned.assignee_id,
         notes: selectedSuggestion.description,
       });
       setSuggestions((prev) =>
         prev.map((row) =>
           row.meeting_id === selectedSuggestion.meeting_id && row.action_seq === selectedSuggestion.action_seq
-            ? { ...selectedSuggestion, assignee: name, assignee_id: null }
+            ? { ...selectedSuggestion, assignee: assigned.assignee, assignee_id: assigned.assignee_id }
             : row,
         ),
       );
@@ -720,7 +725,8 @@ export default function TasksPage() {
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
-                        setSelected(task);
+                        setSelected({ ...task, due_date: dateOnly(task.due_date) || task.due_date });
+                        setSelectedNote("");
                       }
                     }}
                     className={`flex cursor-pointer gap-3 rounded-xl border p-4 shadow-sm transition-shadow ${

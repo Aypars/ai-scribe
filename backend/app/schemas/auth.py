@@ -2,7 +2,6 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
     email: EmailStr
     password: str = Field(min_length=6, max_length=128)
 
@@ -38,10 +37,6 @@ class ForgotPasswordResponse(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str = Field(min_length=16, max_length=256)
     password: str = Field(min_length=6, max_length=128)
-
-
-class UpdateProfileRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
 
 
 class ChangePasswordRequest(BaseModel):

@@ -43,6 +43,7 @@ export type MeetingExportOptions = {
   transcript: TranscriptMode;
   actionSeqs: number[];
   talkShare: boolean;
+  notes?: string;
 };
 
 type ExportCopy = {
@@ -60,6 +61,7 @@ type ExportCopy = {
   talkShare: string;
   attendees: string;
   duration: string;
+  notes: string;
   dateMissing: string;
   timeJoin: string;
   owner: string;
@@ -87,6 +89,7 @@ const COPY_TR: ExportCopy = {
   talkShare: "Kim ne kadar konuştu",
   attendees: "Katılanlar",
   duration: "Süre",
+  notes: "Not",
   dateMissing: "Tarih belirtilmedi",
   timeJoin: ", saat ",
   owner: "Sorumlu",
@@ -114,6 +117,7 @@ const COPY_EN: ExportCopy = {
   talkShare: "Talk time",
   attendees: "Attendees",
   duration: "Duration",
+  notes: "Notes",
   dateMissing: "Date not specified",
   timeJoin: ", ",
   owner: "Owner",
@@ -146,6 +150,16 @@ function heading(ctx: Ctx, title: string, locale: string): void {
 function clock(iso: string | null, locale: string): string {
   if (!iso) return "";
   return new Date(iso).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+}
+
+function trimmedNotes(options: MeetingExportOptions): string {
+  return options.notes?.trim() ?? "";
+}
+
+function writeNotes(ctx: Ctx, notes: string, copy: ExportCopy): void {
+  if (!notes) return;
+  heading(ctx, copy.notes, copy.locale);
+  writeWrapped(ctx, notes, 11, "normal", INK);
 }
 
 function writeSummary(ctx: Ctx, summary: string | null, copy: ExportCopy): void {
@@ -381,6 +395,9 @@ function reportBlocks(meeting: MeetingDetail, options: MeetingExportOptions): Do
     { kind: "kicker", text: copy.kicker },
     { kind: "title", text: meeting.title.trim() || copy.meeting },
     ...meetingMetaLines(meeting).map((text) => ({ kind: "meta" as const, text })),
+    ...(trimmedNotes(options)
+      ? ([{ kind: "h2" as const, text: copy.notes }, { kind: "p" as const, text: trimmedNotes(options) }] as DocBlock[])
+      : []),
     ...summaryBlocks(meeting.summary, copy),
     { kind: "h2", text: copy.decisions },
   ];
@@ -439,6 +456,35 @@ async function buildTranscriptPdf(meeting: MeetingDetail): Promise<Uint8Array> {
   return new Uint8Array(extra.doc.output("arraybuffer"));
 }
 
+async function buildMeetingPdfBytes(meeting: MeetingDetail, options: MeetingExportOptions): Promise<Uint8Array> {
+  await readyMeasure();
+  const copy = copyFor(meeting);
+  const actions = selectedActions(meeting, options.actionSeqs);
+  const { doc, ctx } = await newDocument();
+  writeHeader(ctx, meeting);
+  writeNotes(ctx, trimmedNotes(options), copy);
+  writeSummary(ctx, meeting.summary, copy);
+  writeDecisions(ctx, meeting.decisions, copy);
+  writeActions(ctx, actions, copy);
+  if (options.transcript === "include") {
+    if (options.talkShare) writeTalkShare(ctx, meeting);
+    heading(ctx, copy.transcript, copy.locale);
+    writeTranscriptLines(ctx, meeting.transcript, copy);
+  }
+  writeFooters(doc);
+  return new Uint8Array(doc.output("arraybuffer"));
+}
+
+export async function previewMeetingReport(
+  meeting: MeetingDetail,
+  options: MeetingExportOptions,
+): Promise<Blob> {
+  const bytes = await buildMeetingPdfBytes(meeting, options);
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return new Blob([copy], { type: "application/pdf" });
+}
+
 export async function downloadMeetingReport(
   meeting: MeetingDetail,
   options: MeetingExportOptions,
@@ -478,26 +524,8 @@ export async function downloadMeetingReport(
     return;
   }
 
-  await readyMeasure();
-  const actions = selectedActions(meeting, options.actionSeqs);
-  const { doc, ctx } = await newDocument();
-  writeHeader(ctx, meeting);
-  writeSummary(ctx, meeting.summary, copy);
-  writeDecisions(ctx, meeting.decisions, copy);
-  writeActions(ctx, actions, copy);
-
-  if (options.transcript === "include") {
-    if (options.talkShare) writeTalkShare(ctx, meeting);
-    heading(ctx, copy.transcript, copy.locale);
-    writeTranscriptLines(ctx, meeting.transcript, copy);
-    writeFooters(doc);
-    triggerDownload(new Uint8Array(doc.output("arraybuffer")), `${reportName}.pdf`);
-    return;
-  }
-
+  const reportBytes = await buildMeetingPdfBytes(meeting, options);
   if (options.transcript === "attach") {
-    writeFooters(doc);
-    const reportBytes = new Uint8Array(doc.output("arraybuffer"));
     const transcriptFile = await buildTranscriptPdf(meeting);
     const { strToU8, zipSync } = await import("fflate");
     const zipped = zipSync({
@@ -509,6 +537,5 @@ export async function downloadMeetingReport(
     return;
   }
 
-  writeFooters(doc);
-  triggerDownload(new Uint8Array(doc.output("arraybuffer")), `${reportName}.pdf`);
+  triggerDownload(reportBytes, `${reportName}.pdf`);
 }

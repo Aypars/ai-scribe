@@ -145,6 +145,8 @@ def create_from_action(
         name, person_id = action.assignee, action.assignee_id
     action.assignee = name
     action.assignee_id = person_id
+    if due_date is not None:
+        action.due_date = due_date
     task = Task(
         meeting_id=meeting.meeting_id,
         action_seq=action.seq,
@@ -205,6 +207,9 @@ def update_task(
             task.assignee = assignee
     if due_date_set:
         task.due_date = due_date
+        action = db.get(Action, (task.meeting_id, task.action_seq))
+        if action is not None:
+            action.due_date = due_date
     if description is not None:
         action = db.get(Action, (task.meeting_id, task.action_seq))
         if action is not None:

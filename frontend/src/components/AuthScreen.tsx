@@ -1,6 +1,7 @@
 "use client";
 
 import { ThemeToggle } from "@/components/ThemeToggle";
+import type { ReactNode } from "react";
 
 export function AuthScreen({
   title,
@@ -9,7 +10,7 @@ export function AuthScreen({
 }: {
   title: string;
   subtitle?: string;
-  children: React.ReactNode;
+  children?: ReactNode;
 }) {
   return (
     <div className="flex min-h-full flex-1">

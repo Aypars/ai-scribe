@@ -20,7 +20,7 @@ export function FormatPicker({
         return (
           <label
             key={choice.id}
-            className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 ${
+            className={`flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 ${
               active
                 ? "border-teal-600 bg-teal-50/80 dark:border-teal-500 dark:bg-teal-950/50"
                 : "border-slate-200 hover:bg-slate-50 dark:border-teal-800 dark:hover:bg-teal-950/40"
@@ -29,14 +29,11 @@ export function FormatPicker({
             <input
               type="radio"
               name={name}
-              className="mt-1 accent-teal-700"
+              className="accent-teal-700"
               checked={active}
               onChange={() => onChange(choice.id)}
             />
-            <span>
-              <span className="block text-sm font-medium text-slate-800 dark:text-teal-50">{choice.title}</span>
-              <span className="mt-0.5 block text-xs leading-5 text-slate-500 dark:text-slate-400">{choice.hint}</span>
-            </span>
+            <span className="text-sm font-medium text-slate-800 dark:text-teal-50">{choice.title}</span>
           </label>
         );
       })}

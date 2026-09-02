@@ -14,14 +14,9 @@ const nav = [
   { href: "/people", label: "Kişiler", match: (path: string) => path.startsWith("/people") },
 ];
 
-function initials(name: string): string {
-  return name
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
+function initials(email: string): string {
+  const local = (email.split("@")[0] || email).replace(/[^a-zA-Z0-9ğüşöçıİĞÜŞÖÇ]/g, "");
+  return (local.slice(0, 2) || "?").toUpperCase();
 }
 
 export function AppShell({
@@ -103,7 +98,7 @@ export function AppShell({
                   : "bg-teal-800 text-teal-100 hover:bg-teal-700"
               }`}
             >
-              {initials(user.name)}
+              {initials(user.email)}
             </Link>
           </div>
         </div>

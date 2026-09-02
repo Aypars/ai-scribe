@@ -21,7 +21,6 @@ from app.schemas.auth import (
     RegisterRequest,
     ResetPasswordRequest,
     TokenResponse,
-    UpdateProfileRequest,
     UserOut,
 )
 from app.services.mail import MailError, send_password_reset, smtp_configured
@@ -48,7 +47,7 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)) -> TokenRespo
     try:
         user = users_repo.create_user(
             db,
-            name=body.name.strip(),
+            name=email.split("@")[0][:255] or email,
             email=email,
             password_hash=hash_password(body.password),
         )
@@ -77,18 +76,6 @@ def login(body: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
 @router.get("/me", response_model=UserOut)
 def me(current_user: User = Depends(get_current_user)) -> User:
     return current_user
-
-
-@router.patch("/me", response_model=UserOut)
-def update_profile(
-    body: UpdateProfileRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> User:
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Ad boş olamaz")
-    return users_repo.update_name(db, current_user, name)
 
 
 @router.post("/change-password", response_model=UserOut)

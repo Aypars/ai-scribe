@@ -16,6 +16,9 @@ from app.repositories import people as people_repo
 from app.repositories import tasks as tasks_repo
 from app.schemas.meeting import (
     ActionOut,
+    AskCiteOut,
+    AskIn,
+    AskOut,
     DecisionOut,
     MeetingDetailOut,
     MeetingListOut,
@@ -27,6 +30,7 @@ from app.schemas.meeting import (
     TranscriptionProgressOut,
 )
 from app.services.analysis import AnalysisError, analyze_transcript, match_decision_span, _is_transient_gemini
+from app.services.ask import AskError, ask_transcript
 from app.services.meeting_lang import current_lang, normalize_lang
 from app.services.storage import (
     AUDIO_MEDIA_TYPES,
@@ -509,6 +513,38 @@ def retry_analysis(
     db.commit()
     schedule_analysis(meeting_id)
     return _detail_out(db, meeting)
+
+
+@router.post("/{meeting_id}/ask", response_model=AskOut)
+def ask_meeting(
+    meeting_id: int,
+    body: AskIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AskOut:
+    meeting = meetings_repo.get_for_user(db, current_user.user_id, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toplantı bulunamadı")
+    if not meeting.transcripts:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Soru için önce transkript gerekir",
+        )
+    try:
+        result = ask_transcript(
+            list(meeting.transcripts),
+            body.question,
+            language=getattr(meeting, "language", None),
+        )
+    except AskError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return AskOut(
+        answer=result.answer,
+        cites=[
+            AskCiteOut(seq=row.seq, timestamp=row.timestamp, speaker=row.speaker, text=row.text)
+            for row in result.cites
+        ],
+    )
 
 
 @router.get("", response_model=MeetingListOut)

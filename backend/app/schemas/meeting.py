@@ -111,7 +111,23 @@ class MeetingUpdate(BaseModel):
 
 
 class SpeakerRenameIn(BaseModel):
-    speaker: str | None = Field(default=None, max_length=128)
+    speaker: str | None = Field(default=None, max_length=64)
     seq: int | None = None
-    from_speaker: str | None = Field(default=None, max_length=128)
+    from_speaker: str | None = Field(default=None, max_length=64)
     action: Literal["confirm", "reject"] | None = None
+
+
+class AskIn(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+
+
+class AskCiteOut(BaseModel):
+    seq: int
+    timestamp: int
+    speaker: str | None = None
+    text: str
+
+
+class AskOut(BaseModel):
+    answer: str
+    cites: list[AskCiteOut] = Field(default_factory=list)

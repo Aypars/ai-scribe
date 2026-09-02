@@ -32,7 +32,8 @@ import {
 } from "@/lib/api";
 import { dateOnly, dueTone, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/demo-data";
 import { ExportMeetingDialog } from "@/components/ExportMeetingDialog";
-import { downloadMeetingReport } from "@/lib/export-meeting";
+import { MeetingAsk } from "@/components/MeetingAsk";
+import { downloadMeetingReport, previewMeetingReport } from "@/lib/export-meeting";
 import { speakerStats, type SpeakerStat } from "@/lib/speaker-stats";
 import { talkColorClass } from "@/lib/talk-colors";
 
@@ -41,6 +42,7 @@ const tabs = [
   { id: "summary", label: "Özet" },
   { id: "decisions", label: "Kararlar" },
   { id: "actions", label: "Aksiyonlar" },
+  { id: "ask", label: "Yapay Zeka'ya Sor" },
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
@@ -858,6 +860,7 @@ export default function MeetingDetailPage() {
     assignee_id: number | null;
     assigneeNote: string;
     due_date: string;
+    notes: string;
   } | null>(null);
   const [decisionTaskSaving, setDecisionTaskSaving] = useState(false);
   const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
@@ -1064,6 +1067,21 @@ export default function MeetingDetailPage() {
     }
   }
 
+  function revertEdit() {
+    if (meeting) {
+      setTitle(meeting.title);
+      setDate(toDatetimeLocal(meeting.date));
+      setAttendeeNames(parseAttendeeList(meeting.named_attendees ?? ""));
+      setDescription(meeting.description ?? "");
+    }
+    setEditing(false);
+  }
+
+  function openAction(item: ActionItem) {
+    setActionNote("");
+    setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() });
+  }
+
   async function handleDelete() {
     if (!meeting) return;
     const ok = await confirm({
@@ -1124,7 +1142,16 @@ export default function MeetingDetailPage() {
         speaker,
         ...(body.seq != null ? { seq: body.seq } : { from_speaker: body.from_speaker }),
       });
-      setMeeting({ ...meeting, transcript: updated.transcript, attendees: updated.attendees, named_attendees: updated.named_attendees });
+      setMeeting({
+        ...meeting,
+        transcript: updated.transcript,
+        attendees: updated.attendees,
+        named_attendees: updated.named_attendees,
+        summary: updated.summary,
+        decisions: updated.decisions,
+        actions: updated.actions,
+      });
+      setActionItems(updated.actions.map((item) => ({ ...item })));
       setLineEdit(null);
       setBulkEdit(null);
       toast("Konuşmacı başarıyla güncellendi");
@@ -1277,6 +1304,7 @@ export default function MeetingDetailPage() {
       assignee_id: null,
       assigneeNote: "",
       due_date: todayISO(),
+      notes: "",
     });
   }
 
@@ -1301,6 +1329,7 @@ export default function MeetingDetailPage() {
       );
       const suggestion = suggestionFor(decisionDraft.source, actionItems);
       const title = decisionDraft.title.trim() || decisionDraft.source.text;
+      const description = decisionDraft.notes.trim();
       if (suggestion) {
         await createTask({
           meeting_id: meeting.meeting_id,
@@ -1308,7 +1337,7 @@ export default function MeetingDetailPage() {
           assignee: assigned.assignee,
           assignee_id: assigned.assignee_id,
           due_date: due,
-          description: suggestion.notes || suggestion.description,
+          description,
           action_seq: suggestion.seq,
         });
       } else {
@@ -1318,7 +1347,7 @@ export default function MeetingDetailPage() {
           assignee: assigned.assignee,
           assignee_id: assigned.assignee_id,
           due_date: due,
-          description: decisionDraft.source.text,
+          description,
         });
       }
       const updated = await fetchMeeting(meeting.meeting_id);
@@ -1442,8 +1471,8 @@ export default function MeetingDetailPage() {
     : splitTranscriptSentences(meeting.transcript);
   const usingOriginalLines = meeting.transcript.some((line) => line.speaker);
   const speakers = speakerStats(lines, meeting.duration, (name) => isPendingSpeaker(name, lines));
-  const attendeeValue = (meeting.named_attendees || "").trim()
-    ? meeting.named_attendees
+  const attendeeValue: string | null = (meeting.named_attendees || "").trim()
+    ? meeting.named_attendees ?? null
     : speakers.length
       ? speakers.map((item) => item.name).join(", ")
       : meeting.attendees;
@@ -1486,6 +1515,20 @@ export default function MeetingDetailPage() {
     setTab("transcript");
     setFocusSeq(line.seq);
     seekTo(line.timestamp);
+  }
+
+  function jumpToAskCite(seq: number, timestamp: number) {
+    const line = lines.find((row) => row.seq === seq);
+    if (line) {
+      jumpToTranscript(line);
+      return;
+    }
+    setDecisionView(null);
+    setFilterSpeaker(null);
+    setTranscriptQuery("");
+    setTab("transcript");
+    setFocusSeq(seq);
+    seekTo(timestamp);
   }
 
   function openLineEdit(seq: number, current: string) {
@@ -1549,7 +1592,7 @@ export default function MeetingDetailPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setEditing(false)}
+                  onClick={revertEdit}
                   className="h-10 cursor-pointer rounded-lg px-4 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-teal-900/40"
                 >
                   Vazgeç
@@ -2359,6 +2402,14 @@ export default function MeetingDetailPage() {
             </>
           ) : null}
 
+          <div className={tab === "ask" ? "" : "hidden"}>
+            <MeetingAsk
+              meetingId={meeting.meeting_id}
+              hasTranscript={lines.length > 0}
+              onJump={jumpToAskCite}
+            />
+          </div>
+
           {tab === "actions" && (
             <>
               <p className="mb-4 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
@@ -2387,12 +2438,12 @@ export default function MeetingDetailPage() {
                       key={item.seq}
                       role="button"
                       tabIndex={0}
-                      onClick={() => setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() })}
+                      onClick={() => openAction(item)}
                       onKeyDown={(e) => {
                         if (isTypingTarget(e.target)) return;
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() });
+                          openAction(item);
                         }
                       }}
                       className={`flex cursor-pointer flex-col gap-3 rounded-xl border p-4 shadow-sm transition-shadow sm:flex-row sm:items-center sm:justify-between ${
@@ -2453,7 +2504,7 @@ export default function MeetingDetailPage() {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() });
+                              openAction(item);
                             }}
                             className="cursor-pointer rounded-lg bg-teal-700 px-3 py-2 text-sm font-medium text-white hover:bg-teal-800"
                           >
@@ -2489,6 +2540,14 @@ export default function MeetingDetailPage() {
             .catch(() => toast("Dışa aktarılamadı"))
             .finally(() => setExporting(false));
         }}
+        onPreview={async (options) => {
+          try {
+            return await previewMeetingReport(meeting, options);
+          } catch {
+            toast("Önizleme açılamadı");
+            throw new Error("preview failed");
+          }
+        }}
       />
       {selected && (
         <div className="fixed inset-0 z-20 flex justify-end bg-slate-950/30">
@@ -2516,6 +2575,7 @@ export default function MeetingDetailPage() {
                 <span className="font-medium text-slate-700">Sorumlu</span>
                 <PersonPicker
                   attendeeNames={speakers.map((item) => stripGuessMark(item.name) || item.name)}
+                  people={meeting.people}
                   valueId={selected.assignee_id}
                   valueName={selected.assignee ?? ""}
                   onChange={(personId, name, note) => {
@@ -2648,6 +2708,15 @@ export default function MeetingDetailPage() {
                   value={decisionDraft.due_date}
                   onChange={(e) => setDecisionDraft({ ...decisionDraft, due_date: e.target.value })}
                   className={field}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="font-medium text-slate-700 dark:text-teal-100">Açıklama</span>
+                <textarea
+                  rows={4}
+                  value={decisionDraft.notes}
+                  onChange={(e) => setDecisionDraft({ ...decisionDraft, notes: e.target.value })}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-slate-400 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
                 />
               </label>
             </div>

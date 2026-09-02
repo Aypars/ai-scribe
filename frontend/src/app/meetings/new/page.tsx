@@ -47,6 +47,10 @@ export default function NewMeetingPage() {
       setError("Sadece MP3, WAV, M4A, MP4, WEBM veya MOV");
       return;
     }
+    if (next.size > 500 * 1024 * 1024) {
+      setError("Dosya 500 MB sınırını aşıyor");
+      return;
+    }
     setError(null);
     setFile(next);
   }

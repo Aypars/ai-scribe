@@ -4,10 +4,10 @@ import { triggerDownload } from "@/lib/export-pdf";
 
 export type ExportFormat = "pdf" | "docx" | "markdown";
 
-export const FORMAT_CHOICES: { id: ExportFormat; title: string; hint: string }[] = [
-  { id: "pdf", title: "PDF", hint: "Her yerde açılır, yazdırmaya uygun." },
-  { id: "docx", title: "Word", hint: "Microsoft Word belgesi (.docx)." },
-  { id: "markdown", title: "Markdown", hint: "Düz metin dosyası (.md)." },
+export const FORMAT_CHOICES: { id: ExportFormat; title: string }[] = [
+  { id: "pdf", title: "PDF" },
+  { id: "docx", title: "Word" },
+  { id: "markdown", title: "Markdown" },
 ];
 
 export type DocBlock =

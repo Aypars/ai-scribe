@@ -1,57 +1,59 @@
 # AI-SCRIBE
 
-Ses analizli toplantı asistanı ve iş takip sistemi.
+Toplantı kaydını yazıya çevirir, özet / karar / görev çıkarır, tutanak indirir.
 
-Toplantı ses kayıtlarını (`.mp3`, `.wav`, `.m4a`) yükleyip Whisper ile metne çevirir; GPT-4o-mini ile özet, kararlar ve aksiyon maddeleri üretir; aksiyonları görev kartlarına dönüştürür.
+Kayıt yükle → WhisperX transkript → sen **Analiz yap** → özet, kararlar, aksiyonlar. Transkript hazırsa **Sor** ile bu kayda soru sorulur. Analiz otomatik başlamaz.
 
-## Teknoloji
+## Ne var
 
-| Katman | Stack |
-|--------|--------|
-| Frontend | Next.js + React + Tailwind CSS |
-| Backend | Python FastAPI |
-| DB | PostgreSQL |
-| Depolama | Yerel (`backend/uploads/`) |
-| AI | OpenAI Whisper + GPT-4o-mini |
+- Hesap: kayıt, giriş, şifre sıfırlama (SMTP), hesap ayarları
+- Toplantı: ses (mp3 / wav / m4a) veya video (mp4 / webm / mov); yüklerken **Türkçe / English**
+- Transkript + oynatıcı, konuşmacı eşleme, satır düzeltme
+- Analiz: Çerçeve / Gündem / Sonuç (EN: Context / Agenda / Outcome), kararlar, aksiyonlar
+- Görev panosu, kişiler, dashboard takvim
+- Dışa aktarma: PDF, Word, Markdown — dil toplantı diline göre
+- Sor: yalnız bu transkriptten yanıt; damgaya basınca sese atlar
 
-Monorepo: `frontend/` + `backend/`.
+Monorepo: `frontend/` (Next.js) + `backend/` (FastAPI) + PostgreSQL.
 
-## Hafta 1 teslimatı (analiz)
+## Yerelde çalıştırma
 
-Detaylar `docs/week1/` altında:
+Şu an geliştirme böyle: kendi makinede üç parça ayrı çalışır.
 
-1. [Teknoloji ve mimari](docs/week1/01-technology-and-architecture.md)
-2. [Mockup’lar](docs/week1/02-mockups.md)
-3. [Hafta 1-2 raporu (PDF)](docs/week1/week1.pdf)
+### 1. PostgreSQL
 
-## Repo yapısı
+`ai-scribe` adında veritabanı oluştur. `backend/.env` içindeki `DATABASE_URL` ile aynı olsun.
 
-```text
-ai-scribe/
-├── docs/week1/          # Analiz & tasarım
-├── frontend/            # Next.js (Hafta 2+)
-├── backend/             # FastAPI (Hafta 2+)
-├── .gitignore
-└── README.md
-```
-
-## Kurulum (Hafta 2 iskeleti)
-
-### Backend
+### 2. Backend
 
 ```bash
 cd backend
 python -m venv .venv
-.\.venv\Scripts\activate          # Windows
-# source .venv/bin/activate       # macOS/Linux
+.\.venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env            # OPENAI_API_KEY ve DATABASE_URL doldur
-uvicorn app.main:app --reload --port 8000
+copy .env.example .env
 ```
 
-API docs: http://localhost:8000/docs
+`.env` içinde doldur:
 
-### Frontend
+| Değişken | Ne |
+|----------|----|
+| `DATABASE_URL` | Postgres |
+| `SECRET_KEY` | JWT, rastgele uzun string |
+| `GEMINI_API_KEY` | Analiz ve Sor (yoksa `OPENAI_API_KEY`) |
+| `HF_TOKEN` | WhisperX diarization (konuşmacı ayırma) |
+| `FRONTEND_URL` | Şifre sıfırlama linki, varsayılan `http://localhost:3000` |
+| `SMTP_*` | Şifre sıfırlama maili; boşsa link log’a düşer |
+
+```bash
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --reload --reload-dir app
+```
+
+API: http://localhost:8000/docs — şema açılışta `ensure_schema` ile tamamlanır.
+
+Transkript için makinede **ffmpeg** ve **WhisperX** gerekir (ayrı `whisperx-env`). Video yüklemede ffmpeg ses çıkarır. Analiz çalışırken `backend/app` dosyasını kaydetme: `--reload` işi öldürür.
+
+### 3. Frontend
 
 ```bash
 cd frontend
@@ -59,21 +61,37 @@ npm install
 npm run dev
 ```
 
-Uygulama: http://localhost:3000
+Uygulama: http://localhost:3000  
+İsteğe bağlı: `NEXT_PUBLIC_API_URL` (varsayılan `http://localhost:8000`).
 
-### PostgreSQL
+## Docker ne, ne zaman
 
-`ai_scribe` adında bir veritabanı oluştur; `backend/.env` içindeki `DATABASE_URL` ile eşleştir.
+Docker, uygulamayı “bu makinede Python / Node / Postgres kur” yerine **kutuya koyup aynı şekilde çalıştırır**.
 
-## Yol haritası (özet)
+Şu an sende üç ayrı şey var: Postgres servisi, uvicorn, `npm run dev`. Hepsi senin Windows’una bağlı (venv, whisperx-env yolu, portlar).
 
-| Hafta | Odak |
-|-------|------|
-| 1 | Analiz, mockup, şema, API ✅ |
-| 2 | Geliştirme ortamı, repo, iskelet |
-| 3 | UI + CRUD |
-| 4 | Whisper / GPT entegrasyonu |
-| 5 | Dashboard + görev panosu |
-| 6 | Export / raporlama |
-| 7 | Test, bugfix, performans |
-| 8 | Deploy + demo |
+Docker’da tipik kutu üç servis olur:
+
+1. **postgres** — veritabanı
+2. **backend** — FastAPI + (ileride) ffmpeg / Whisper ağırlığı
+3. **frontend** — Next.js production build
+
+`docker compose up` deyince üçü birden ayağa kalkar. Yeni PC, sunucu, jüri makinesi: aynı komut. “Bende çalışıyor sende yok” azalır.
+
+**Ne işe yaramaz:** kod yazmayı hızlandırmaz, bug da düzeltmez. Uygulama bitmiş ve yerelde sağlamsa **dağıtım / demo** içindir.
+
+**Ne zaman:** küçük işler ve bariz bug’lar kapanınca. WhisperX GPU ve büyük modeller kutuyu şişirir; o yüzden Docker’ı sona bırakmak doğru. Bu repoda henüz `Dockerfile` / `compose` yok.
+
+Kutu gelince `.env` yine gerekir (API anahtarları kutunun içine gömülmez). Ses dosyaları volume ile `uploads/`’a yazılır.
+
+## Repo
+
+```text
+ai-scribe/
+├── backend/          FastAPI, şema, uploads
+├── frontend/         Next.js
+├── docs/week1/       İlk analiz notları
+└── README.md
+```
+
+`downloads/` ve `backend/.env` gitmez.
