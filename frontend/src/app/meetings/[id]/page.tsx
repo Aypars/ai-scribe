@@ -31,6 +31,7 @@ import {
   type TranscriptLine,
 } from "@/lib/api";
 import { dateOnly, dueTone, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/dates";
+import { followUpFor, formatClock, suggestionFor } from "@/lib/meeting-detail";
 import { ExportMeetingDialog } from "@/components/ExportMeetingDialog";
 import { MeetingAsk } from "@/components/MeetingAsk";
 import { downloadMeetingReport, previewMeetingReport } from "@/lib/export-meeting";
@@ -49,27 +50,6 @@ type TabId = (typeof tabs)[number]["id"];
 
 const field =
   "h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50 dark:focus:border-teal-500";
-
-function formatClock(iso: string | null): string {
-  if (!iso) return "";
-  return new Date(iso).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
-}
-
-function foldText(value: string): string {
-  return value.toLocaleLowerCase("tr").replace(/\s+/g, " ").trim();
-}
-
-function followUpFor(decision: Decision, actions: ActionItem[]): ActionItem | undefined {
-  const key = foldText(decision.text);
-  if (!key) return undefined;
-  return actions.find((item) => item.task_status && foldText(item.description) === key);
-}
-
-function suggestionFor(decision: Decision, actions: ActionItem[]): ActionItem | undefined {
-  const key = foldText(decision.text);
-  if (!key) return undefined;
-  return actions.find((item) => !item.task_status && foldText(item.description) === key);
-}
 
 function MetaStat({
   label,

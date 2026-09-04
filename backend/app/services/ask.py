@@ -5,7 +5,8 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.models.transcript import Transcript
-from app.services.analysis import AnalysisError, _api_key, _complete_json, _openai_key, _transcript_text
+from app.services.analysis import AnalysisError, _transcript_text
+from app.services.llm import _api_key, _complete_json, _openai_key
 from app.services.meeting_lang import current_lang, maybe_fix_i, normalize_lang
 
 _MAX_TRANSCRIPT_CHARS = 180_000

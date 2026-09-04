@@ -111,7 +111,10 @@ backend/app/
 │   ├── storage.py          Yükleme, uzantı, 500 MB sınırı
 │   ├── transcription.py    WhisperX, ffmpeg, konuşmacı ayırma
 │   ├── speakers.py         Ad listesi ile Konuşmacı A/B eşleme
-│   ├── analysis.py         Özet / karar / aksiyon (dil modeli)
+│   ├── analysis.py         Özet / karar / aksiyon boru hattı
+│   ├── analysis_prompts.py Analiz prompt metinleri
+│   ├── llm.py              Gemini / OpenAI JSON çağrıları
+│   ├── meeting_jobs.py     Transkript, konuşmacı eşleme, analiz işleri
 │   ├── ask.py              Tek toplantıya soru
 │   ├── transcript_review.py
 │   ├── mail.py             Şifre sıfırlama e-postası

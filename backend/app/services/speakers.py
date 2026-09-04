@@ -220,7 +220,7 @@ def resolve_speaker_map(lines: list, *, title: str = "", names: list[str] | None
     if not labels or not mentioned:
         return {}
 
-    from app.services.analysis import AnalysisError, _api_key, _generate_json
+    from app.services.llm import AnalysisError, _api_key, _generate_json
 
     api_key = _api_key()
     if not api_key:

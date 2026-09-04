@@ -57,7 +57,8 @@ def find_span(text: str, original: str) -> tuple[int, int] | None:
 
 
 def review_transcript(lines: list, *, title: str) -> list[ReviewItem]:
-    from app.services.analysis import _api_key, _model_name, _transcript_text
+    from app.services.analysis import _transcript_text
+    from app.services.llm import _api_key, _model_name
 
     api_key = _api_key()
     if not api_key or not lines:
