@@ -37,18 +37,7 @@ def _whisperx_model() -> str:
     return (os.getenv("WHISPERX_MODEL") or settings.whisperx_model or "large-v3").strip()
 
 
-def _split_sentence_segments(raw_segments: list[dict]) -> list[TranscriptSegment]:
-    pieces: list[tuple[float, float, str]] = []
-    for item in raw_segments:
-        text = str(item.get("text") or "").strip()
-        if not text:
-            continue
-        start = float(item.get("start") or 0)
-        end = float(item.get("end") or start)
-        if end <= start:
-            end = start + max(1.0, len(text) / 14)
-        pieces.append((start, end, text))
-
+def _split_timed_pieces(pieces: list[tuple[float, float, str]]) -> list[tuple[int, str]]:
     joined = ""
     ts_at: list[float] = []
     for start, end, text in pieces:
@@ -60,7 +49,7 @@ def _split_sentence_segments(raw_segments: list[dict]) -> list[TranscriptSegment
             ts_at.append(start + (index / max(len(text), 1)) * span)
             joined += char
 
-    sentences: list[TranscriptSegment] = []
+    sentences: list[tuple[int, str]] = []
     last = 0
     last_ts = 0
     for match in _SENTENCE_END.finditer(joined):
@@ -71,15 +60,29 @@ def _split_sentence_segments(raw_segments: list[dict]) -> list[TranscriptSegment
             idx = min(last + lead, max(len(ts_at) - 1, 0))
             timestamp = max(last_ts, int(ts_at[idx]) if ts_at else 0)
             last_ts = timestamp
-            sentences.append(TranscriptSegment(timestamp=timestamp, text=maybe_fix_i(text)))
+            sentences.append((timestamp, text))
         last = end
     tail = joined[last:].strip()
     if tail:
         lead = len(joined[last:]) - len(joined[last:].lstrip())
         idx = min(last + lead, max(len(ts_at) - 1, 0))
         timestamp = max(last_ts, int(ts_at[idx]) if ts_at else 0)
-        sentences.append(TranscriptSegment(timestamp=timestamp, text=maybe_fix_i(tail)))
+        sentences.append((timestamp, tail))
     return sentences
+
+
+def _split_sentence_segments(raw_segments: list[dict]) -> list[TranscriptSegment]:
+    pieces: list[tuple[float, float, str]] = []
+    for item in raw_segments:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        start = float(item.get("start") or 0)
+        end = float(item.get("end") or start)
+        if end <= start:
+            end = start + max(1.0, len(text) / 14)
+        pieces.append((start, end, text))
+    return [TranscriptSegment(timestamp=ts, text=maybe_fix_i(text)) for ts, text in _split_timed_pieces(pieces)]
 
 _WINGET_FFMPEG = Path.home() / (
     "AppData/Local/Microsoft/WinGet/Packages/"
@@ -251,6 +254,27 @@ def clear_transcription(meeting_id: int) -> None:
         _procs.pop(meeting_id, None)
 
 
+def _kill_whisperx_binaries() -> None:
+    if os.name != "nt":
+        return
+    subprocess.run(
+        ["taskkill", "/IM", "whisperx.exe", "/F"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def cancel_all_transcriptions() -> None:
+    with _proc_lock:
+        ids = list(_procs)
+        procs = list(_procs.values())
+        _cancel_ids.update(ids)
+    for proc in procs:
+        _kill_tree(proc)
+    _kill_whisperx_binaries()
+
+
 def _first_existing(paths: list[Path]) -> Path | None:
     for path in paths:
         if path.is_file():
@@ -312,6 +336,84 @@ def extract_audio_from_video(video_path: Path) -> Path:
             raise TranscriptionError("Videoda ses kanalı yok")
         raise TranscriptionError("Videodan ses çıkarılamadı")
     return dest
+
+
+_convert_locks_guard = threading.Lock()
+_convert_locks: dict[str, threading.Lock] = {}
+
+
+def _playback_copy(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.seek.mp3")
+
+
+def ensure_seekable_audio(path: Path) -> Path:
+    """VBR MP3 Xing table is coarse (~1% of duration). CBR seeks to the second."""
+    if not path.is_file():
+        return path
+    if path.suffix.lower() != ".mp3" or path.name.endswith(".seek.mp3"):
+        return path
+    dest = _playback_copy(path)
+    if dest.is_file() and dest.stat().st_size > 1024:
+        return dest
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        return path
+    key = str(path.resolve())
+    with _convert_locks_guard:
+        lock = _convert_locks.setdefault(key, threading.Lock())
+    with lock:
+        if dest.is_file() and dest.stat().st_size > 1024:
+            return dest
+        tmp = path.with_name(f"{path.stem}.seek.tmp.mp3")
+        cmd = [
+            str(ffmpeg),
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(path),
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            str(tmp),
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30 * 60,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired:
+            tmp.unlink(missing_ok=True)
+            return path
+        if completed.returncode != 0 or not tmp.is_file() or tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            return path
+        tmp.replace(dest)
+    return dest if dest.is_file() else path
+
+
+def schedule_seekable_audio(path: Path) -> None:
+    if path.suffix.lower() != ".mp3" or path.name.endswith(".seek.mp3"):
+        return
+    threading.Thread(target=ensure_seekable_audio, args=(path,), daemon=True).start()
+
+
+def playback_audio_path(path: Path) -> Path:
+    if path.suffix.lower() != ".mp3":
+        return path
+    cbr = _playback_copy(path)
+    if cbr.is_file() and cbr.stat().st_size > 1024:
+        return cbr
+    m4a = path.with_suffix(".m4a")
+    if m4a.is_file() and m4a.stat().st_size > 1024:
+        return m4a
+    schedule_seekable_audio(path)
+    return path
 
 
 def _find_whisper() -> Path | None:
@@ -416,13 +518,124 @@ def _fill_word_speakers(speakers: list[str | None], seg_speaker: str | None) -> 
     return filled
 
 
-def _group_words_by_speaker(item: dict) -> list[tuple[float, str, str | None]]:
+def _speaker_runs(labels: list[str | None]) -> list[tuple[int, int, str | None]]:
+    if not labels:
+        return []
+    runs: list[tuple[int, int, str | None]] = []
+    start = 0
+    current = labels[0]
+    for index, label in enumerate(labels[1:], 1):
+        if label != current:
+            runs.append((start, index, current))
+            start = index
+            current = label
+    runs.append((start, len(labels), current))
+    return runs
+
+
+def _smooth_word_speakers(speakers: list[str | None], *, max_island: int = 2) -> list[str | None]:
+    """Drop 1–2 word speaker flips sandwiched in the same voice (pyannote noise)."""
+    labels = list(speakers)
+    for _ in range(len(labels) + 1):
+        runs = _speaker_runs(labels)
+        absorbed = False
+        for index, (start, end, speaker) in enumerate(runs):
+            width = end - start
+            if width > max_island or not speaker:
+                continue
+            left = runs[index - 1][2] if index else None
+            right = runs[index + 1][2] if index + 1 < len(runs) else None
+            take = None
+            if left and left == right and left != speaker:
+                take = left
+            elif left is None and right and right != speaker:
+                take = right
+            elif right is None and left and left != speaker:
+                take = left
+            if not take:
+                continue
+            labels[start:end] = [take] * width
+            absorbed = True
+            break
+        if not absorbed:
+            break
+    return labels
+
+
+def _backfill_speakers(speakers: list[str | None], seg_speaker: str | None) -> list[str | None]:
+    filled = list(speakers)
+    last: str | None = None
+    for index, speaker in enumerate(filled):
+        if speaker:
+            last = speaker
+        elif last:
+            filled[index] = last
+    last = None
+    for index in range(len(filled) - 1, -1, -1):
+        if filled[index]:
+            last = filled[index]
+        elif last:
+            filled[index] = last
+    if seg_speaker:
+        filled = [item or seg_speaker for item in filled]
+    return filled
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\S+", text or ""))
+
+
+def collapse_speaker_flicker(rows: list[TranscriptSegment], *, max_island: int = 2) -> list[TranscriptSegment]:
+    items = [
+        TranscriptSegment(timestamp=row.timestamp, text=(row.text or "").strip(), speaker=row.speaker)
+        for row in rows
+        if (row.text or "").strip()
+    ]
+    for _ in range(len(items) + 1):
+        absorbed = False
+        for index in range(1, len(items) - 1):
+            mid = items[index]
+            if _word_count(mid.text) > max_island:
+                continue
+            left = items[index - 1].speaker
+            right = items[index + 1].speaker
+            if not left or left != right or left == mid.speaker:
+                continue
+            items[index - 1].text = f"{items[index - 1].text} {mid.text}".strip()
+            del items[index]
+            absorbed = True
+            break
+        if not absorbed:
+            break
+    return spread_long_lines(_merge_broken_sentences(items))
+
+
+def _fit_word_times(seg_start: float, seg_end: float, stamps: list[float]) -> list[float]:
+    """Snap drifted alignment times back onto the ASR segment clock."""
+    if not stamps:
+        return []
+    first = stamps[0]
+    last = max(stamps[-1], first)
+    dest_end = seg_end if seg_end > seg_start else last
+    late = first - seg_start
+    overrun = last - dest_end if dest_end else 0.0
+    if late <= 0.75 and overrun <= 0.75:
+        return stamps
+    src_span = last - first
+    dst_span = max(dest_end - seg_start, 0.05)
+    if src_span <= 0.02:
+        return [seg_start for _ in stamps]
+    return [seg_start + (stamp - first) / src_span * dst_span for stamp in stamps]
+
+
+def _speaker_word_groups(item: dict) -> list[tuple[str | None, list[tuple[float, str]]]]:
     text = str(item.get("text") or "").strip()
     start = float(item.get("start") or 0)
+    end = float(item.get("end") or start)
     seg_speaker = _speaker_label(item.get("speaker"))
     words = item.get("words") or []
     if not isinstance(words, list) or not words:
-        return [(start, text, seg_speaker)]
+        return [(seg_speaker, [(start, text)] if text else [])]
 
     tokens: list[tuple[float, str]] = []
     raw_speakers: list[str | None] = []
@@ -435,25 +648,52 @@ def _group_words_by_speaker(item: dict) -> list[tuple[float, str, str | None]]:
         tokens.append((float(word.get("start") or start), token))
         raw_speakers.append(_speaker_label(word.get("speaker")))
     if not tokens:
-        return [(start, text, seg_speaker)]
+        return [(seg_speaker, [(start, text)] if text else [])]
 
-    speakers = _fill_word_speakers(raw_speakers, seg_speaker)
-    groups: list[tuple[float, str, str | None]] = []
-    current: list[str] = []
+    fitted = _fit_word_times(start, end, [stamp for stamp, _ in tokens])
+    tokens = [(fitted[index], token) for index, (_, token) in enumerate(tokens)]
+    speakers = _backfill_speakers(
+        _smooth_word_speakers(_fill_word_speakers(raw_speakers, seg_speaker)),
+        seg_speaker,
+    )
+    groups: list[tuple[str | None, list[tuple[float, str]]]] = []
+    current: list[tuple[float, str]] = []
     current_speaker = speakers[0]
-    current_start = tokens[0][0]
     for (stamp, token), speaker in zip(tokens, speakers):
         if speaker != current_speaker and current:
-            groups.append((current_start, _join_words(current), current_speaker))
-            current = [token]
+            groups.append((current_speaker, current))
+            current = [(stamp, token)]
             current_speaker = speaker
-            current_start = stamp
             continue
-        current.append(token)
+        current.append((stamp, token))
         current_speaker = speaker
     if current:
-        groups.append((current_start, _join_words(current), current_speaker))
-    return groups or [(start, text, seg_speaker)]
+        groups.append((current_speaker, current))
+    return groups or [(seg_speaker, [(start, text)] if text else [])]
+
+
+def _group_words_by_speaker(item: dict) -> list[tuple[float, str, str | None]]:
+    groups: list[tuple[float, str, str | None]] = []
+    for speaker, words in _speaker_word_groups(item):
+        if not words:
+            continue
+        groups.append((words[0][0], _join_words([token for _, token in words]), speaker))
+    if groups:
+        return groups
+    text = str(item.get("text") or "").strip()
+    start = float(item.get("start") or 0)
+    return [(start, text, _speaker_label(item.get("speaker")))] if text else []
+
+
+def _sentences_from_words(words: list[tuple[float, str]]) -> list[tuple[int, str]]:
+    pieces: list[tuple[float, float, str]] = []
+    for index, (stamp, token) in enumerate(words):
+        token = str(token or "").strip()
+        if not token:
+            continue
+        nxt = words[index + 1][0] if index + 1 < len(words) else stamp + max(0.35, len(token) / 12)
+        pieces.append((stamp, max(nxt, stamp + 0.05), token))
+    return _split_timed_pieces(pieces) if pieces else []
 
 
 def _merge_broken_sentences(rows: list[TranscriptSegment]) -> list[TranscriptSegment]:
@@ -466,6 +706,7 @@ def _merge_broken_sentences(rows: list[TranscriptSegment]) -> list[TranscriptSeg
             merged
             and merged[-1].speaker == row.speaker
             and not _ENDED.search((merged[-1].text or "").strip())
+            and _word_count(text) <= 4
         ):
             merged[-1].text = f"{merged[-1].text} {text}".strip()
             continue
@@ -475,21 +716,51 @@ def _merge_broken_sentences(rows: list[TranscriptSegment]) -> list[TranscriptSeg
     return merged
 
 
+_MAX_LINE_WORDS = 14
+
+
+def spread_long_lines(rows: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    """Give long agenda dumps their own timestamps so a click is not 8s early."""
+    out: list[TranscriptSegment] = []
+    total_rows = len(rows)
+    for index, row in enumerate(rows):
+        words = re.findall(r"\S+", row.text or "")
+        if len(words) <= _MAX_LINE_WORDS:
+            out.append(
+                TranscriptSegment(timestamp=row.timestamp, text=(row.text or "").strip(), speaker=row.speaker)
+            )
+            continue
+        next_ts = rows[index + 1].timestamp if index + 1 < total_rows else row.timestamp + max(len(words), 1)
+        span = max(next_ts - row.timestamp, 1)
+        used = 0
+        for start in range(0, len(words), _MAX_LINE_WORDS):
+            chunk = words[start : start + _MAX_LINE_WORDS]
+            stamp = row.timestamp + int(used / len(words) * span)
+            out.append(TranscriptSegment(timestamp=stamp, text=" ".join(chunk), speaker=row.speaker))
+            used += len(chunk)
+    return out
+
+
 def _segments_from_whisperx(raw_segments: list[dict]) -> list[TranscriptSegment]:
     segments: list[TranscriptSegment] = []
     for item in raw_segments:
         if not isinstance(item, dict):
             continue
-        for stamp, text, speaker in _group_words_by_speaker(item):
-            for sentence in _split_sentences(text):
+        for speaker, words in _speaker_word_groups(item):
+            sentences = _sentences_from_words(words)
+            if not sentences and words:
+                joined = _join_words([token for _, token in words])
+                if joined:
+                    sentences = [(max(0, int(words[0][0])), joined)]
+            for stamp, sentence in sentences:
                 segments.append(
                     TranscriptSegment(
-                        timestamp=max(0, int(stamp)),
+                        timestamp=max(0, stamp),
                         text=maybe_fix_i(sentence),
                         speaker=speaker,
                     )
                 )
-    return _merge_broken_sentences(segments)
+    return collapse_speaker_flicker(_merge_broken_sentences(segments))
 
 
 def _tool_env() -> dict[str, str]:
@@ -697,6 +968,7 @@ def _transcribe_audio(
 
     if on_progress:
         on_progress(5, "WhisperX başlatılıyor…" if use_whisperx else "Model yükleniyor…")
+    schedule_seekable_audio(audio_path)
 
     with tempfile.TemporaryDirectory(prefix="whisper-") as tmp:
         out_dir = Path(tmp)
@@ -717,6 +989,7 @@ def _transcribe_audio(
             with _transcribe_lock:
                 if _is_cancelled(meeting_id):
                     raise TranscriptionCancelled("Yazıya çevirme iptal edildi")
+                _kill_matching_windows(audio_path.name)
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,

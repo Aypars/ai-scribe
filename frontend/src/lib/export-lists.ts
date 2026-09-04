@@ -1,5 +1,5 @@
 import type { Task } from "@/lib/api";
-import { byDueDate, countDueAlerts, dueRemainingLabel, dueTone, formatDay, formatDate } from "@/lib/demo-data";
+import { byDueDate, countDueAlerts, dueRemainingLabel, dueTone, formatDay, formatDate } from "@/lib/dates";
 import {
   type DocBlock,
   type ExportFormat,

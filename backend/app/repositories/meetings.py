@@ -92,10 +92,13 @@ def _rewrite_analysis_labels(db: Session, meeting: Meeting, mapping: dict[str, s
     for decision in db.scalars(select(Decision).where(Decision.meeting_id == meeting.meeting_id)).all():
         decision.text = rewrite_labels(decision.text or "", mapping)
     for action in db.scalars(select(Action).where(Action.meeting_id == meeting.meeting_id)).all():
-        if action.assignee:
+        if action.assignee and action.assignee_id is None:
             action.assignee = rewrite_labels(action.assignee, mapping)
         if action.notes:
             action.notes = rewrite_labels(action.notes, mapping)
+    for task in db.scalars(select(Task).where(Task.meeting_id == meeting.meeting_id)).all():
+        if task.assignee and task.assignee_id is None:
+            task.assignee = rewrite_labels(task.assignee, mapping)
 
 
 def list_for_user(db: Session, user_id: int) -> list[Meeting]:
@@ -244,6 +247,45 @@ def replace_transcript(
     return meeting
 
 
+def smooth_transcript_if_needed(db: Session, meeting: Meeting) -> Meeting:
+    from app.services.transcription import collapse_speaker_flicker
+
+    rows = sorted(meeting.transcripts, key=lambda row: row.seq)
+    if len(rows) < 3:
+        return meeting
+    segments = [
+        TranscriptSegment(timestamp=row.timestamp, text=row.text, speaker=row.speaker) for row in rows
+    ]
+    fixed = collapse_speaker_flicker(segments)
+    before = [(row.timestamp, row.text, row.speaker) for row in segments]
+    after = [(row.timestamp, row.text, row.speaker) for row in fixed]
+    if before == after:
+        return meeting
+    origin_by_speaker: dict[str, str | None] = {}
+    for row in rows:
+        if row.speaker and row.speaker not in origin_by_speaker:
+            origin_by_speaker[row.speaker] = row.speaker_origin
+    db.execute(delete(Transcript).where(Transcript.meeting_id == meeting.meeting_id))
+    for seq, segment in enumerate(fixed, start=1):
+        db.add(
+            Transcript(
+                meeting_id=meeting.meeting_id,
+                seq=seq,
+                text=segment.text,
+                timestamp=segment.timestamp,
+                speaker=segment.speaker,
+                speaker_origin=origin_by_speaker.get(segment.speaker) if segment.speaker else None,
+            )
+        )
+    _apply_attendees(meeting, fixed)
+    from app.repositories import people as people_repo
+
+    people_repo.sync_speakers_for_meeting(db, meeting, fixed, commit=False)
+    db.commit()
+    db.refresh(meeting)
+    return meeting
+
+
 def mark_failed(db: Session, meeting: Meeting) -> Meeting:
     meeting.status = "failed"
     db.commit()
@@ -266,14 +308,71 @@ def rename_speaker_line(db: Session, meeting: Meeting, seq: int, speaker: str) -
     return meeting
 
 
-def rename_speaker_all(db: Session, meeting: Meeting, from_speaker: str, speaker: str) -> Meeting:
+def replace_speaker_names(
+    db: Session,
+    meeting: Meeting,
+    mapping: dict[str, str],
+    *,
+    commit: bool = False,
+) -> None:
+    cleaned = {
+        (old or "").strip(): (new or "").strip()
+        for old, new in mapping.items()
+        if (old or "").strip() and (new or "").strip()
+    }
+    if not cleaned:
+        return
+    from app.services.speakers import is_generic_label, parse_named_attendees, rewrite_name_list, strip_guess_mark
+    from app.services.turkish import lower_tr
+
+    folded = {lower_tr(old): strip_guess_mark(new) for old, new in cleaned.items()}
+    exact = {old: strip_guess_mark(new) for old, new in cleaned.items()}
     for row in meeting.transcripts:
-        if row.speaker == from_speaker:
-            row.speaker = speaker
+        speaker = (row.speaker or "").strip()
+        if not speaker:
+            continue
+        new = folded.get(lower_tr(speaker))
+        if not new or speaker == new:
+            continue
+        exact[speaker] = new
+        row.speaker = new
+        row.speaker_origin = None
+    confirmed = {strip_guess_mark(value) for value in exact.values() if value}
+    for row in meeting.transcripts:
+        speaker = (row.speaker or "").strip()
+        clean = strip_guess_mark(speaker)
+        if clean in confirmed and (speaker != clean or row.speaker_origin):
+            exact[speaker] = clean
+            row.speaker = clean
             row.speaker_origin = None
+    had_named = bool((meeting.named_attendees or "").strip())
+    names = parse_named_attendees(rewrite_name_list(meeting.named_attendees, exact) if meeting.named_attendees else None)
+    seen = {lower_tr(name) for name in names}
+    for new in exact.values():
+        target = strip_guess_mark(new)
+        if not target or is_generic_label(target):
+            continue
+        key = lower_tr(target)
+        if key not in seen:
+            names.append(target)
+            seen.add(key)
+    if had_named:
+        meeting.named_attendees = ", ".join(names) if names else None
     _apply_attendees(meeting, meeting.transcripts)
+    _rewrite_analysis_labels(db, meeting, exact)
     from app.repositories import people as people_repo
 
+    people_repo.sync_speakers_for_meeting(db, meeting, meeting.transcripts, commit=False)
+    if commit:
+        db.commit()
+
+
+def rename_speaker_all(db: Session, meeting: Meeting, from_speaker: str, speaker: str) -> Meeting:
+    from app.repositories import people as people_repo
+
+    if people_repo.speaker_name_taken(meeting, speaker, [from_speaker]):
+        raise people_repo.PersonNameConflict("Bu toplantıda bu isimde bir konuşmacı zaten var")
+    replace_speaker_names(db, meeting, {from_speaker: speaker}, commit=False)
     people_repo.rename_speaker_person(db, meeting, from_speaker, speaker)
     db.commit()
     db.refresh(meeting)
@@ -522,6 +621,7 @@ def update_action(
     assignee_set: bool = False,
     assignee: str | None = None,
     assignee_id: int | None = None,
+    speaker_label: str | None = None,
     due_date_set: bool = False,
     due_date: date | None = None,
     notes_set: bool = False,
@@ -541,6 +641,7 @@ def update_action(
             meeting=meeting,
             assignee_id=assignee_id,
             assignee_name=assignee,
+            speaker_label=speaker_label,
         )
         action.assignee = name
         action.assignee_id = person_id

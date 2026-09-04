@@ -24,7 +24,7 @@ import { FilterSelect, MeetingIcon, PersonIcon, SelectWrap } from "@/components/
 import { PersonPicker, splitAttendeeNames } from "@/components/PersonPicker";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
-import { byDueDate, countDueAlerts, dateOnly, dueTone, todayISO } from "@/lib/demo-data";
+import { byDueDate, countDueAlerts, dateOnly, dueTone, todayISO } from "@/lib/dates";
 import { ExportFormatDialog } from "@/components/FormatPicker";
 import { downloadOpenTasksReport } from "@/lib/export-lists";
 import type { ExportFormat } from "@/lib/export-office";
@@ -78,6 +78,7 @@ export default function TasksPage() {
     assignee: "",
     assignee_id: null as number | null,
     assigneeNote: "",
+    assigneeSpeaker: null as string | null,
     due_date: "",
     description: "",
   });
@@ -85,7 +86,9 @@ export default function TasksPage() {
   const [meetingFilter, setMeetingFilter] = useState<number | "all">("all");
   const [convertDue, setConvertDue] = useState("");
   const [convertNote, setConvertNote] = useState("");
+  const [convertSpeaker, setConvertSpeaker] = useState<string | null>(null);
   const [selectedNote, setSelectedNote] = useState("");
+  const [selectedSpeaker, setSelectedSpeaker] = useState<string | null>(null);
   const [boardView, setBoardView] = useState<"suggestions" | TaskStatus>("suggestions");
   const [boardLayout, setBoardLayout] = useState<"focus" | "board">("focus");
   const [exporting, setExporting] = useState(false);
@@ -124,6 +127,7 @@ export default function TasksPage() {
         if (!found) return;
         setSelected({ ...found, due_date: dateOnly(found.due_date) || found.due_date });
         setSelectedNote("");
+        setSelectedSpeaker(null);
         setBoardView(found.status);
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : "Görevler alınamadı"));
@@ -235,6 +239,7 @@ export default function TasksPage() {
         status: selected.status,
         assignee: assigned.assignee || null,
         assignee_id: assigned.assignee_id,
+        speaker_label: selectedSpeaker,
         due_date: due,
         description: selected.description,
       });
@@ -288,9 +293,13 @@ export default function TasksPage() {
     try {
       const assigned = await ensurePerson(draft.assignee_id, draft.assignee, draft.assigneeNote);
       const created = await createTask({
-        ...draft,
+        meeting_id: draft.meeting_id,
+        title: draft.title,
         assignee: assigned.assignee,
         assignee_id: assigned.assignee_id,
+        speaker_label: draft.assigneeSpeaker,
+        due_date: draft.due_date,
+        description: draft.description,
       });
       setItems((prev) => [created, ...prev]);
       setCreating(false);
@@ -301,6 +310,7 @@ export default function TasksPage() {
         assignee: "",
         assignee_id: null,
         assigneeNote: "",
+        assigneeSpeaker: null,
         due_date: "",
         description: "",
       }));
@@ -332,6 +342,7 @@ export default function TasksPage() {
         description: item.title.trim() || item.description,
         assignee: assigned.assignee || null,
         assignee_id: assigned.assignee_id,
+        speaker_label: convertSpeaker,
         notes: item.description,
       });
       const created = await createTask({
@@ -339,6 +350,7 @@ export default function TasksPage() {
         title: item.title.trim() || item.description || "Görev",
         assignee: assigned.assignee,
         assignee_id: assigned.assignee_id,
+        speaker_label: convertSpeaker,
         due_date: due,
         description: item.description,
         action_seq: item.action_seq,
@@ -373,6 +385,7 @@ export default function TasksPage() {
         description: selectedSuggestion.title.trim() || selectedSuggestion.description,
         assignee: assigned.assignee || null,
         assignee_id: assigned.assignee_id,
+        speaker_label: convertSpeaker,
         notes: selectedSuggestion.description,
       });
       setSuggestions((prev) =>
@@ -635,6 +648,7 @@ export default function TasksPage() {
                     setSelectedSuggestion(item);
                     setConvertDue(todayISO());
                     setConvertNote("");
+                    setConvertSpeaker(null);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -642,6 +656,7 @@ export default function TasksPage() {
                       setSelectedSuggestion(item);
                       setConvertDue(todayISO());
                       setConvertNote("");
+                      setConvertSpeaker(null);
                     }
                   }}
                   className="flex cursor-pointer gap-3 rounded-xl border border-teal-200 bg-teal-50 p-4 shadow-sm transition-shadow hover:border-teal-400 hover:shadow-[0_0_18px_rgba(13,148,136,0.5)] dark:border-teal-800/50 dark:bg-teal-950/40"
@@ -671,6 +686,7 @@ export default function TasksPage() {
                         setSelectedSuggestion(item);
                         setConvertDue(todayISO());
                         setConvertNote("");
+                        setConvertSpeaker(null);
                       }}
                       className="mt-auto cursor-pointer rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-800"
                     >
@@ -721,12 +737,14 @@ export default function TasksPage() {
                     onClick={() => {
                       setSelected({ ...task, due_date: dateOnly(task.due_date) || task.due_date });
                       setSelectedNote("");
+                      setSelectedSpeaker(null);
                     }}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
                         setSelected({ ...task, due_date: dateOnly(task.due_date) || task.due_date });
                         setSelectedNote("");
+                        setSelectedSpeaker(null);
                       }
                     }}
                     className={`flex cursor-pointer gap-3 rounded-xl border p-4 shadow-sm transition-shadow ${
@@ -824,7 +842,14 @@ export default function TasksPage() {
                       value={draft.meeting_id}
                       onChange={(e) => {
                         const meetingId = Number(e.target.value);
-                        setDraft({ ...draft, meeting_id: meetingId, assignee: "", assignee_id: null, assigneeNote: "" });
+                        setDraft({
+                          ...draft,
+                          meeting_id: meetingId,
+                          assignee: "",
+                          assignee_id: null,
+                          assigneeNote: "",
+                          assigneeSpeaker: null,
+                        });
                       }}
                       className={`${field} cursor-pointer appearance-none truncate pr-9`}
                     >
@@ -853,8 +878,14 @@ export default function TasksPage() {
                   people={people}
                   valueId={draft.assignee_id}
                   valueName={draft.assignee}
-                  onChange={(personId, name, note) =>
-                    setDraft({ ...draft, assignee_id: personId, assignee: name, assigneeNote: note ?? "" })
+                  onChange={(personId, name, note, speakerLabel) =>
+                    setDraft({
+                      ...draft,
+                      assignee_id: personId,
+                      assignee: name,
+                      assigneeNote: note ?? "",
+                      assigneeSpeaker: speakerLabel ?? null,
+                    })
                   }
                 />
               </label>
@@ -944,11 +975,12 @@ export default function TasksPage() {
                   people={people}
                   valueId={selectedSuggestion.assignee_id}
                   valueName={selectedSuggestion.assignee ?? ""}
-                  onChange={(personId, name, note) => {
+                  onChange={(personId, name, note, speakerLabel) => {
                     setSelectedSuggestion((prev) =>
                       prev ? { ...prev, assignee_id: personId, assignee: name } : prev,
                     );
                     setConvertNote(note ?? "");
+                    setConvertSpeaker(speakerLabel ?? null);
                   }}
                 />
               </label>
@@ -1040,9 +1072,10 @@ export default function TasksPage() {
                   people={people}
                   valueId={selected.assignee_id}
                   valueName={selected.assignee ?? ""}
-                  onChange={(personId, name, note) => {
+                  onChange={(personId, name, note, speakerLabel) => {
                     setSelected((prev) => (prev ? { ...prev, assignee_id: personId, assignee: name } : prev));
                     setSelectedNote(note ?? "");
+                    setSelectedSpeaker(speakerLabel ?? null);
                   }}
                 />
               </label>

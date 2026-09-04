@@ -15,8 +15,19 @@ export type DocBlock =
   | { kind: "title"; text: string }
   | { kind: "meta"; text: string }
   | { kind: "h2"; text: string }
+  | { kind: "h3"; text: string }
   | { kind: "p"; text: string }
+  | { kind: "quote"; kicker: string; text: string }
+  | { kind: "bullets"; items: string[] }
   | { kind: "item"; n: number; text: string; meta?: string; extra?: string };
+
+function mdHeading(text: string): string {
+  return text.replace(/^#+\s*/, "").trim();
+}
+
+function blank(lines: string[]): void {
+  if (lines.length && lines[lines.length - 1] !== "") lines.push("");
+}
 
 export function blocksToMarkdown(blocks: DocBlock[]): string {
   const lines: string[] = [];
@@ -25,21 +36,59 @@ export function blocksToMarkdown(blocks: DocBlock[]): string {
       lines.push(`*${block.text}*`);
       lines.push("");
     } else if (block.kind === "title") {
-      lines.push(`# ${block.text}`);
+      lines.push(`# ${mdHeading(block.text)}`);
       lines.push("");
     } else if (block.kind === "meta") {
-      if (block.text.trim()) lines.push(block.text);
-    } else if (block.kind === "h2") {
+      if (!block.text.trim()) continue;
+      lines.push(`*${block.text}*`);
       lines.push("");
-      lines.push(`## ${block.text}`);
+    } else if (block.kind === "h2") {
+      blank(lines);
+      lines.push("---");
+      lines.push("");
+      lines.push(`## ${mdHeading(block.text)}`);
+      lines.push("");
+    } else if (block.kind === "h3") {
+      lines.push(`### ${mdHeading(block.text)}`);
       lines.push("");
     } else if (block.kind === "p") {
-      lines.push(block.text);
+      const paras = block.text.split(/\n+/).map((part) => part.trim()).filter(Boolean);
+      if (!paras.length) continue;
+      lines.push(paras.join("\n\n"));
+      lines.push("");
+    } else if (block.kind === "quote") {
+      lines.push(`**${block.kicker}**`);
+      lines.push("");
+      const body = block.text.trim() || " ";
+      lines.push(
+        body
+          .split("\n")
+          .map((line) => `> ${line || " "}`)
+          .join("\n"),
+      );
+      lines.push("");
+    } else if (block.kind === "bullets") {
+      for (const item of block.items) {
+        const cut = item.indexOf(" — ");
+        if (cut > 0) {
+          lines.push(`- **${item.slice(0, cut)}** — ${item.slice(cut + 3)}`);
+        } else {
+          lines.push(`- ${item}`);
+        }
+      }
       lines.push("");
     } else {
-      lines.push(`${block.n}. ${block.text}`);
-      if (block.meta) lines.push(`   ${block.meta}`);
-      if (block.extra) lines.push(`   ${block.extra}`);
+      lines.push(`${block.n}. **${block.text}**`);
+      if (block.meta) {
+        lines.push("");
+        lines.push(`   *${block.meta}*`);
+      }
+      if (block.extra) {
+        lines.push("");
+        for (const extra of block.extra.split(/\n+/).map((part) => part.trim()).filter(Boolean)) {
+          lines.push(`   ${extra}`);
+        }
+      }
       lines.push("");
     }
   }
@@ -81,9 +130,43 @@ export function blocksToParagraphs(blocks: DocBlock[]): Paragraph[] {
           children: [runs(block.text, { bold: true, size: 28, color: "0F766E" })],
         }),
       );
+    } else if (block.kind === "h3") {
+      out.push(
+        new Paragraph({
+          heading: HeadingLevel.HEADING_3,
+          spacing: { before: 200, after: 100 },
+          children: [runs(block.text, { bold: true, size: 24, color: "0F766E" })],
+        }),
+      );
     } else if (block.kind === "p") {
       for (const line of block.text.split("\n")) {
         out.push(new Paragraph({ spacing: { after: 120 }, children: [runs(line || " ", { size: 22 })] }));
+      }
+    } else if (block.kind === "quote") {
+      out.push(
+        new Paragraph({
+          spacing: { before: 80, after: 40 },
+          children: [runs(block.kicker, { bold: true, size: 20, color: "0F766E" })],
+        }),
+      );
+      for (const line of block.text.split("\n")) {
+        out.push(
+          new Paragraph({
+            spacing: { after: 80 },
+            indent: { left: 240 },
+            children: [runs(line || " ", { size: 22, italics: true })],
+          }),
+        );
+      }
+    } else if (block.kind === "bullets") {
+      for (const item of block.items) {
+        out.push(
+          new Paragraph({
+            bullet: { level: 0 },
+            spacing: { after: 80 },
+            children: [runs(item, { size: 22 })],
+          }),
+        );
       }
     } else {
       out.push(new Paragraph({ spacing: { before: 80, after: 40 }, children: [runs(`${block.n}. ${block.text}`, { size: 22 })] }));
@@ -107,7 +190,7 @@ export async function docxBytes(blocks: DocBlock[]): Promise<Uint8Array> {
 }
 
 export function markdownBytes(blocks: DocBlock[]): Uint8Array {
-  return new TextEncoder().encode(`\uFEFF${blocksToMarkdown(blocks)}`);
+  return new TextEncoder().encode(blocksToMarkdown(blocks));
 }
 
 export function downloadMarkdown(blocks: DocBlock[], filename: string): void {

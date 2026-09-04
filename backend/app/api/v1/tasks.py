@@ -100,6 +100,7 @@ def create_task(
             title=body.title.strip(),
             assignee=body.assignee.strip() if body.assignee else None,
             assignee_id=body.assignee_id,
+            speaker_label=body.speaker_label,
             due_date=due,
         )
         return _to_out(task, meeting.title, action.description, action.notes)
@@ -110,6 +111,7 @@ def create_task(
         title=body.title.strip(),
         assignee=body.assignee.strip() if body.assignee else None,
         assignee_id=body.assignee_id,
+        speaker_label=body.speaker_label,
         due_date=due,
         description=body.description.strip(),
     )
@@ -147,6 +149,7 @@ def update_task(
         assignee_set="assignee" in body.model_fields_set or "assignee_id" in body.model_fields_set,
         assignee=body.assignee.strip() or None if body.assignee is not None else None,
         assignee_id=body.assignee_id,
+        speaker_label=body.speaker_label,
         due_date_set="due_date" in body.model_fields_set,
         due_date=due,
         description=body.description,

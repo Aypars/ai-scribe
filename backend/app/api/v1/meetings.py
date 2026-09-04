@@ -49,6 +49,7 @@ from app.services.transcription import (
     fail_job,
     finish_job,
     get_job,
+    playback_audio_path,
     start_job,
     transcribe_audio,
     update_job,
@@ -639,7 +640,10 @@ def rename_speaker(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Satır veya mevcut konuşmacı adı gerekli",
         )
-    meeting = meetings_repo.rename_speaker_all(db, meeting, from_speaker, speaker)
+    try:
+        meeting = meetings_repo.rename_speaker_all(db, meeting, from_speaker, speaker)
+    except people_repo.PersonNameConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     return _detail_out(db, meeting)
 
 
@@ -678,6 +682,7 @@ def get_meeting_audio(
     path = absolute_audio_path(meeting.audio_path)
     if not path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ses kaydı bulunamadı")
+    path = playback_audio_path(path)
     media_type = AUDIO_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
     return FileResponse(
         path,
@@ -696,6 +701,8 @@ def get_meeting(
     meeting = meetings_repo.get_for_user(db, current_user.user_id, meeting_id)
     if meeting is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toplantı bulunamadı")
+    if meeting.transcripts:
+        meeting = meetings_repo.smooth_transcript_if_needed(db, meeting)
     job = get_job(meeting.meeting_id)
     if meeting.status == "uploaded" and (job is None or job.state != "running"):
         schedule_transcription(meeting.meeting_id)
@@ -780,6 +787,7 @@ def update_meeting(
             assignee_set="assignee" in patch.model_fields_set or "assignee_id" in patch.model_fields_set,
             assignee=patch.assignee.strip() or None if patch.assignee is not None else None,
             assignee_id=patch.assignee_id,
+            speaker_label=patch.speaker_label,
             due_date_set=due_set,
             due_date=due,
             notes_set="notes" in patch.model_fields_set,

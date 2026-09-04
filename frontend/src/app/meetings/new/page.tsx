@@ -8,7 +8,7 @@ import { AppShell } from "@/components/AppShell";
 import { AttendeeListEditor, joinAttendeeList } from "@/components/AttendeeListEditor";
 import { useToast } from "@/components/Toast";
 import { createMeeting } from "@/lib/api";
-import { nowDatetimeLocal } from "@/lib/demo-data";
+import { nowDatetimeLocal } from "@/lib/dates";
 
 const field =
   "h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50 dark:focus:border-teal-500";

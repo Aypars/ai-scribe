@@ -24,7 +24,12 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.1-flash-lite"
     hf_token: str = ""
     upload_dir: str = "uploads"
-    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ]
     secret_key: str = "change-me"
     max_upload_bytes: int = 500 * 1024 * 1024  # 500 MB
     whisper_model: str = "turbo"

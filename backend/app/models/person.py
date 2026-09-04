@@ -5,7 +5,7 @@ from app.core.database import Base
 
 
 class Person(Base):
-    """Per-owner contact. Not a login; two Hasans can be two rows."""
+    """Per-owner contact. Not a login; display names are unique per owner."""
 
     __tablename__ = "people"
 

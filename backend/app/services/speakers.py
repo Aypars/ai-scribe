@@ -76,6 +76,27 @@ def parse_named_attendees(raw: str | None) -> list[str]:
     return names
 
 
+def rewrite_name_list(raw: str | None, mapping: dict[str, str]) -> str | None:
+    if raw is None:
+        return None
+    folded = {lower_tr(old.strip()): new.strip() for old, new in mapping.items() if old and new}
+    if not folded:
+        return raw
+    parts: list[str] = []
+    seen: set[str] = set()
+    for part in _SPLIT_NAMES.split(raw):
+        name = part.strip()
+        if not name:
+            continue
+        replaced = folded.get(lower_tr(name), name)
+        key = lower_tr(replaced)
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(replaced)
+    return ", ".join(parts) if parts else None
+
+
 def rewrite_labels(text: str, mapping: dict[str, str]) -> str:
     out = text or ""
     for label, name in sorted(mapping.items(), key=lambda item: len(item[0]), reverse=True):

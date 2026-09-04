@@ -1,5 +1,5 @@
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.action import Action
 from app.models.meeting import Meeting
@@ -8,6 +8,17 @@ from app.models.person import Person
 from app.models.task import Task
 from app.models.transcript import Transcript
 from app.schemas.person import PersonOut, PersonMeetingOut
+from app.services.turkish import lower_tr
+
+
+class PersonNameConflict(Exception):
+    def __init__(self, detail: str):
+        self.detail = detail
+        super().__init__(detail)
+
+
+def names_match(left: str | None, right: str | None) -> bool:
+    return lower_tr((left or "").strip()) == lower_tr((right or "").strip())
 
 
 def _label(person: Person, *, duplicate_index: int | None = None) -> str:
@@ -130,8 +141,150 @@ def get_for_user(db: Session, user_id: int, person_id: int) -> Person | None:
     return person
 
 
+def find_by_name(
+    db: Session,
+    user_id: int,
+    name: str,
+    *,
+    exclude_id: int | None = None,
+) -> Person | None:
+    needle = lower_tr((name or "").strip())
+    if not needle:
+        return None
+    for person in list_for_user(db, user_id):
+        if exclude_id is not None and person.person_id == exclude_id:
+            continue
+        if lower_tr(person.name) == needle:
+            return person
+    return None
+
+
+def _assert_name_available(db: Session, user_id: int, name: str, *, exclude_id: int | None = None) -> None:
+    if find_by_name(db, user_id, name, exclude_id=exclude_id) is not None:
+        raise PersonNameConflict("Bu isimde biri zaten var")
+
+
+def speaker_name_taken(meeting: Meeting, name: str, aliases: list[str] | None = None) -> bool:
+    target = lower_tr((name or "").strip())
+    if not target:
+        return False
+    skip = {lower_tr(alias.strip()) for alias in (aliases or []) if alias and alias.strip()}
+    for row in meeting.transcripts:
+        speaker = (row.speaker or "").strip()
+        if not speaker:
+            continue
+        key = lower_tr(speaker)
+        if key == target and key not in skip:
+            return True
+    return False
+
+
+def person_for_speaker(db: Session, meeting_id: int, speaker: str) -> Person | None:
+    needle = (speaker or "").strip()
+    if not needle:
+        return None
+    for link, person in meeting_people(db, meeting_id):
+        if names_match(person.name, needle) or names_match(link.speaker_label, needle):
+            return person
+    return match_meeting_person(db, meeting_id, needle)
+
+
+def _person_meeting_ids(db: Session, person_id: int) -> set[int]:
+    ids = _linked_meeting_ids(db, person_id)
+    ids.update(db.scalars(select(Task.meeting_id).where(Task.assignee_id == person_id)).all())
+    ids.update(db.scalars(select(Action.meeting_id).where(Action.assignee_id == person_id)).all())
+    return ids
+
+
+def _meetings_for_person(db: Session, user_id: int, person_id: int) -> list[Meeting]:
+    ids = _person_meeting_ids(db, person_id)
+    if not ids:
+        return []
+    return list(
+        db.scalars(
+            select(Meeting)
+            .options(selectinload(Meeting.transcripts))
+            .where(Meeting.user_id == user_id, Meeting.meeting_id.in_(ids))
+        ).all()
+    )
+
+
+def _aliases_for_person(db: Session, person: Person, old_name: str | None) -> list[str]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str | None) -> None:
+        name = (value or "").strip()
+        key = lower_tr(name)
+        if not name or key in seen:
+            return
+        seen.add(key)
+        aliases.append(name)
+
+    add(old_name)
+    add(person.name)
+    for link in db.scalars(select(MeetingPerson).where(MeetingPerson.person_id == person.person_id)).all():
+        add(link.speaker_label)
+    return aliases
+
+
+def _copy_assignee_name(db: Session, person_id: int, name: str) -> None:
+    for action in db.scalars(select(Action).where(Action.assignee_id == person_id)).all():
+        action.assignee = name
+    for task in db.scalars(select(Task).where(Task.assignee_id == person_id)).all():
+        task.assignee = name
+
+
+def _assert_meetings_accept_name(
+    db: Session,
+    user_id: int,
+    person: Person,
+    new_name: str,
+    aliases: list[str],
+) -> None:
+    for meeting in _meetings_for_person(db, user_id, person.person_id):
+        if speaker_name_taken(meeting, new_name, aliases):
+            raise PersonNameConflict(
+                f"Bu isim “{meeting.title}” toplantısında başka bir konuşmacıda kullanılıyor"
+            )
+
+
+def update_person(
+    db: Session,
+    person: Person,
+    *,
+    name: str | None = None,
+    note_set: bool = False,
+    note: str | None = None,
+) -> Person:
+    from app.repositories import meetings as meetings_repo
+
+    if name is not None:
+        new_name = name.strip()
+        if not new_name:
+            raise PersonNameConflict("İsim gerekli")
+        old_name = person.name
+        aliases = _aliases_for_person(db, person, old_name)
+        if not names_match(new_name, old_name):
+            _assert_name_available(db, person.user_id, new_name, exclude_id=person.person_id)
+            _assert_meetings_accept_name(db, person.user_id, person, new_name, aliases)
+        person.name = new_name
+        _copy_assignee_name(db, person.person_id, person.name)
+        mapping = {alias: person.name for alias in aliases if alias != person.name}
+        if mapping:
+            for meeting in _meetings_for_person(db, person.user_id, person.person_id):
+                meetings_repo.replace_speaker_names(db, meeting, mapping, commit=False)
+    if note_set:
+        person.note = (note or "").strip() or None
+    db.commit()
+    db.refresh(person)
+    return person
+
+
 def create_person(db: Session, *, user_id: int, name: str, note: str | None = None) -> Person:
-    person = Person(user_id=user_id, name=name.strip(), note=(note or "").strip() or None)
+    cleaned = name.strip()
+    _assert_name_available(db, user_id, cleaned)
+    person = Person(user_id=user_id, name=cleaned, note=(note or "").strip() or None)
     db.add(person)
     db.commit()
     db.refresh(person)
@@ -139,7 +292,14 @@ def create_person(db: Session, *, user_id: int, name: str, note: str | None = No
 
 
 def create_person_flush(db: Session, *, user_id: int, name: str, note: str | None = None) -> Person:
-    person = Person(user_id=user_id, name=name.strip(), note=(note or "").strip() or None)
+    cleaned = name.strip()
+    existing = find_by_name(db, user_id, cleaned)
+    extra = (note or "").strip() or None
+    if existing is not None:
+        if extra and not existing.note:
+            existing.note = extra
+        return existing
+    person = Person(user_id=user_id, name=cleaned, note=extra)
     db.add(person)
     db.flush()
     return person
@@ -284,19 +444,51 @@ def rename_speaker_person(db: Session, meeting: Meeting, from_speaker: str, to_s
 
 
 def match_meeting_person(db: Session, meeting_id: int, name: str) -> Person | None:
-    needle = name.strip().casefold()
+    needle = name.strip()
     if not needle:
         return None
     for _link, person in meeting_people(db, meeting_id):
-        if person.name.casefold() == needle:
+        if names_match(person.name, needle):
             return person
     for action in db.scalars(select(Action).where(Action.meeting_id == meeting_id, Action.assignee_id.isnot(None))).all():
-        if (action.assignee or "").casefold() != needle or action.assignee_id is None:
+        if not names_match(action.assignee, needle) or action.assignee_id is None:
             continue
         person = db.get(Person, action.assignee_id)
         if person is not None:
             return person
     return None
+
+
+def _speaker_to_bind(
+    meeting: Meeting,
+    person: Person,
+    speaker_label: str | None,
+    assignee_name: str | None,
+) -> str | None:
+    speakers = speaker_labels(meeting.transcripts)
+    for candidate in (speaker_label, assignee_name, person.name):
+        needle = (candidate or "").strip()
+        if not needle:
+            continue
+        for speaker in speakers:
+            if names_match(speaker, needle):
+                return speaker
+    return None
+
+
+def _bind_person_speaker(
+    db: Session,
+    meeting: Meeting,
+    person: Person,
+    speaker_label: str | None,
+    assignee_name: str | None,
+) -> None:
+    bind = _speaker_to_bind(meeting, person, speaker_label, assignee_name)
+    link_attendee(db, meeting.meeting_id, person.person_id, bind)
+    if bind and not names_match(bind, person.name):
+        from app.repositories import meetings as meetings_repo
+
+        meetings_repo.replace_speaker_names(db, meeting, {bind: person.name}, commit=False)
 
 
 def resolve_assignee(
@@ -306,27 +498,25 @@ def resolve_assignee(
     meeting: Meeting,
     assignee_id: int | None,
     assignee_name: str | None,
+    speaker_label: str | None = None,
     as_attendee: bool = True,
 ) -> tuple[str | None, int | None]:
     if assignee_id is not None:
         person = get_for_user(db, user_id, assignee_id)
         if person is None:
             return None, None
-        link_attendee(db, meeting.meeting_id, person.person_id, None)
+        _bind_person_speaker(db, meeting, person, speaker_label, assignee_name)
         return person.name, person.person_id
 
     name = (assignee_name or "").strip()
     if not name:
         return None, None
 
-    matched = match_meeting_person(db, meeting.meeting_id, name)
-    if matched is not None:
-        link_attendee(db, meeting.meeting_id, matched.person_id, None)
-        return matched.name, matched.person_id
-
-    person = create_person_flush(db, user_id=user_id, name=name)
-    link_attendee(db, meeting.meeting_id, person.person_id, None)
-    return person.name, person.person_id
+    matched = match_meeting_person(db, meeting.meeting_id, name) or find_by_name(db, user_id, name)
+    if matched is None:
+        matched = create_person_flush(db, user_id=user_id, name=name)
+    _bind_person_speaker(db, meeting, matched, speaker_label, name)
+    return matched.name, matched.person_id
 
 
 def backfill(db: Session) -> None:

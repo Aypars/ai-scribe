@@ -78,6 +78,7 @@ def create_for_meeting(
     title: str,
     assignee: str | None,
     assignee_id: int | None = None,
+    speaker_label: str | None = None,
     due_date: date | None,
     description: str,
 ) -> Task:
@@ -90,6 +91,7 @@ def create_for_meeting(
         meeting=meeting,
         assignee_id=assignee_id,
         assignee_name=assignee,
+        speaker_label=speaker_label,
     )
     seq = _next_seq(db, meeting.meeting_id)
     db.add(
@@ -126,6 +128,7 @@ def create_from_action(
     title: str,
     assignee: str | None,
     assignee_id: int | None = None,
+    speaker_label: str | None = None,
     due_date: date | None,
 ) -> Task:
     from app.repositories import people as people_repo
@@ -140,6 +143,7 @@ def create_from_action(
             meeting=meeting,
             assignee_id=assignee_id,
             assignee_name=assignee,
+            speaker_label=speaker_label,
         )
     else:
         name, person_id = action.assignee, action.assignee_id
@@ -176,6 +180,7 @@ def update_task(
     assignee_set: bool = False,
     assignee: str | None = None,
     assignee_id: int | None = None,
+    speaker_label: str | None = None,
     due_date_set: bool = False,
     due_date: date | None = None,
     description: str | None = None,
@@ -196,6 +201,7 @@ def update_task(
                 meeting=meeting,
                 assignee_id=assignee_id,
                 assignee_name=assignee,
+                speaker_label=speaker_label,
             )
             task.assignee = name
             task.assignee_id = person_id

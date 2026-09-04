@@ -25,7 +25,7 @@ _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 ANALYSIS_PROMPT = """Sen AI-SCRIBE için kıdemli bir toplantı raportörüsün. Transkripti baştan sona oku; atlama, sıkıştırarak yok etme.
 
-Kaynak yalnızca transkript. Kullanıcı başlığı metadata; transkriptte geçmeyen hiçbir şeyi başlıktan olay, konu, süre veya karar yapma.
+Kayıt her türlü görüşme olabilir. Türe varsayım yapma. Kaynak yalnızca transkript. Kullanıcı başlığı metadata; transkriptte geçmeyen hiçbir şeyi başlıktan olay, konu, süre veya karar yapma.
 
 JSON sırası: önce decisions, sonra actions, en son summary.
 
@@ -35,15 +35,27 @@ Boş / anlamsız seste: decisions [], actions [], summary 1-2 cümle.
 
 Diyalog varsa:
 
-- decisions: Alınan HER karar. Sayı tavanı yok. Kabul, ret, oy birliği, sevk, atama, yetki, protokol, alım, gündem maddesi — ayrı madde.
-  Aksiyon kararı silmez. Konuşulup bağlanan bir şey aksiyonda varsa kararda da olsun.
-  “toplantı bitti / beyanla sona erdi” karar değildir. Tek cümle. source_seq_start / source_seq_end dar.
+- decisions: Grubun kabul / ret / seçtiği HER sonuç. Sayı tavanı yok. Ayrı sonuçlar ayrı madde.
+  “toplantı bitti” karar değildir.
+  Kişi, tutar, yer, kimlik geçtiyse cümlede tut; “ilgililer seçildi” diye isim silme. Birleştirirken isim düşecekse ayrı bırak.
+  Karar = o anda varılan sonuç (kabul / ret / seçim). Oylanmayan “çalışın / böyle yapın” talimatı karar değil; actions.
+  Aynı olguyu hem decisions hem actions’a yazma.
+  Tek cümle. source_seq_start / source_seq_end dar.
   Karar yoksa [].
 
-- actions: Yalnızca BU transkriptte yapılacak denmiş işler. Başka kayıttan kopyalama.
-  Sayı tavanı yok. Birleştirip kısa liste yapma.
-  description: net iş.
-  assignee: her zaman null. Sorumlu kişi eşleme. due_date: yalnız açık tarih. notes: 1 cümle veya "".
+- actions: Toplantıdan SONRA kalacak iş. Kart, A’nın sormasından değil B’nin üstlenmesinden veya atamasından doğar.
+  Şüphede kart yazma. Açık teslim veya açık atama yoksa boş bırak.
+  Aynı oturumda okunan, aynı teslim türündeki (yazılı rapor / yazılı cevap) kalemler, müdürlükleri ayrı olsa da tek pakettir: tek kart; alt başlıklar notes’ta.
+  Somut fiil söylendiyse (yazın, çevirin, hazırlayın) description’da o fiili koru; “incelensin / değerlendirilsin”e yumuşatma.
+  Yalnız soru, şikayet, iddia, önerge metni, durum güncellemesi kart değildir.
+  Odada bilgi istenip cevaplandıysa brifing kartı yazma. Cevaptan sonra kalan somut iş varsa yalnız onu yaz.
+  Oylanmış gündem maddesinin uygulama adımı karar olarak kalsın; yeni aksiyon kartı yapma.
+  Oylanmamış “gündeme alınsın / değerlendirilsin / uygun görüyoruz” önerisi kart değildir.
+  Farklı yerleri tek karta yapıştırma. İki yer konuşulduysa yalnız somut emir verilen yer kalsın. Aynı konuşmacının peş peşe sorduğu yerler tek iş değildir.
+  Oylanmamış önerge kart değildir. Önergenin “grupta/komisyonda görüşülmesi” de kart değildir; bu ertelemedir.
+  Kartta iki yer adı varsa (ve/ile) birleştirme yapma: yalnız somut emir verilen yer kalsın; bilgi verilen yer adını notes’tan da sil.
+  description net iş cümlesi olsun. notes yalnız o işe ait bağlam içersin.
+  assignee her zaman null. due_date yalnız açık tarih.
 
 - summary: Üç bölümlü anlatım. Karar listesini kopyalama; duyulanı anlat.
   Çerçeve: 4–6 cümle. Kim konuştu, kayıt ne üzerine, transkriptteki konular.
@@ -62,41 +74,57 @@ CHUNK_PROMPT = """Bu transkript DİLİMİ. Her satırı oku. Uydurma yok. Yalnı
 JSON: decisions, actions, section.
 
 KARAR (sonuç, usul değil):
-- Yazılacak: kabul, ret, sevk, atama, seçilen kişi, yetki, protokol, alım, bağış, resmi olur.
-- Bir oylama/seçimin SONUCU tek (veya kazanan başına bir) karardır. “Murat Yıldız İklim Komisyonuna seçildi” yeter.
-- YAZILMAYACAK ayrı karar: isimleri ekrana yansıt, oylamayı başlat, aday oku, yoklama, mikrofon, ara, “kura çekelim”, “yeniden oylayalım” tartışmasının her cümlesi. Usul tartışması varsa en fazla bir cümle, asıl sonuç ayrı.
-- Farklı komisyon / farklı kişi / farklı gündem maddesi AYRI kalsın. “toplantı bitti” karar değil.
+- Yazılacak: bu dilimde gerçekten varılan sonuç (kabul / ret / seçim).
+- Kişi, tutar, yer, kimlik geçtiyse cümlede tut; isimleri “ilgililer”e çevirme.
+- Bir sürecin SONUCU tek maddedir (veya ayrı kazanan/ayrı konu başına bir).
+- YAZILMAYACAK ayrı karar: hazırlık, ara, nasıl varıldığı, her ara cümle. Usul varsa en fazla bir cümle; asıl sonuç ayrı.
+- Toplantı sonrası iş ve oylanmayan “çalışın / böyle yapın” karara yazılmaz; actions’a yazılır. Aynı olgu iki listede durmaz.
+- Farklı kişi / farklı konu AYRI kalsın. “toplantı bitti” karar değil.
 - Tek cümle. source_seq_start / source_seq_end yalnızca bu dilimdeki #.
 
 AKSİYON (toplantıdan SONRA kalacak iş):
-- Yazılacak: yazı/olur hazırlamak, tebliğ, ödeme, belge, başka kuruma iletmek, sonraki toplantıya rapor, takip.
-- YAZILMAYACAK: salonda şimdi yapılanlar — oylama yapmak, isimleri yansıtmak, kura çekmek, aday belirlemek, seçim sürecini bu oturumda başlatmak. Bunlar görev kartı değil.
-- Aynı işi tekrarlama. description net. notes biraz bağlam (1–2 cümle). assignee her zaman null. due_date yalnız açık tarih.
+- Şüphede yazma. Açık teslim veya açık atama yoksa kart yok. Yöneticinin verdiği kısa somut emir (çevirin, yazın, çalışın) karttır.
+- Kart, A’nın talebinden değil B’nin üstlenmesinden/atamasından doğar.
+- Aynı oturumda okunan yazılı rapor/cevap kalemleri, müdürlükleri ayrı olsa da tek karttır; alt başlıklar notes’ta.
+- Somut fiili koru; “incele / değerlendir”e yumuşatma.
+- Soru, şikayet, iddia, önerge metni, durum bildirimi kart değildir.
+- Odada bilgi istenip cevaplandıysa brifing kartı yazma; cevap sonrası kalan somut emir varsa onu yaz. Üye peş peşe iki yer sorup biri cevaplandıysa yalnız emir verilen yer kart olur.
+- Oylanmış maddenin uygulama adımını ve oylanmamış “değerlendirilsin” önerisini kart yapma.
+- Karar listesini görev listesine kopyalama.
+- Farklı yerleri tek karta yapıştırma. Aynı konuşmacının peş peşe sorduğu yerler tek iş değildir. Aynı işi tekrarlama.
+- description net ve tek iş olsun. notes yalnız o işin bağlamı olsun. assignee null.
 
 section: Bu dilimin anlatımı. En az 3 paragraf, kısa tutma. Markdown yok, Çerçeve/Gündem/Sonuç başlığı yok.
 Her konu için: ne konuşuldu, kim ne dedi. Karar yoksa karar icat etme. Transkriptte yoksa başlıktan konu alma.
 """
 
-REFINE_PROMPT = """Ham çıkarımı tutanak kalitesine çek. Yeni olay uydurma. Farklı gündem maddesini silme.
+REFINE_PROMPT = """Ham çıkarımı netleştir. Yeni olay uydurma. Farklı konuyu silme.
 
 KARARLAR:
-- Bir seçim/oylama sürecinin adımlarını birleştir. Sonuç yazılsın: kim seçildi, ne kabul/ret/sevk edildi.
-- Örnek yanlış: ayrı ayrı “oylama yapıldı”, “eşitlik oldu”, “kura çekilsin”, “MHP başkanı çeksin”, “kayıt alındı”.
-- Örnek doğru: “İklim Değişikliği ve Çevre Komisyonuna Murat Yıldız seçildi (eşitlikte kura).”
-- Farklı komisyonlar ve farklı kazananlar AYRI karar kalsın.
+- Bir sonucun adımlarını birleştir. Sonuç yazılsın: ne kabul/ret edildi; kişi, tutar, yer, kimlik geçtiyse adı kalsın.
+- İsim düşüren birleştirme yanlış; o zaman ayrı bırak. Ayrı seçimler ayrı madde, ya da tek cümlede bütün adlar. Aday gösterenleri seçilmiş yazma.
+- Yanlış: süreci parça parça ayrı maddeler yapmak.
+- Doğru: tek sonuç cümlesi. Ayrı konular ayrı kalsın.
+- Toplantı sonrası iş ve oylanmayan “çalışın / böyle yapın” buradan actions’a taşı; kararda bırakma. İki listede aynı olgu durmasın.
 - source_seq_start / source_seq_end, birleştirdiğin ham maddelerdeki aralıktan alınsın.
 
 AKSİYONLAR:
-- Yalnızca toplantı bittikten sonra yapılacak işler. Salondaki oylama, ekrana yansıtma, kura, aday okuma SİL.
-- Aynı takip işini tek maddede birleştir; notes’u biraz geniş tut (hangi birim, ne istenecek).
-- assignee her zaman null. Sorumlu kişi yazma.
+- Aynı oturumda okunan yazılı rapor/cevap/önerge kalemleri, konu başlıkları farklı görünse de TEK pakettir: tek kart. Alt başlıkları notes’ta sırala. Müdürlük müdürlük ayrı kart bırakma.
+- Açık teslimi veya açık ataması olmayan kartı sil.
+- Kart B’nin üstlendiği/atadığı teslim olsun. Somut fiil ve isimleri koru; yumuşatma.
+- Teslimi olmayan erteleme, salt durum, salt soru/şikayet/iddia, oylanmamış öneriyi sil.
+- Odada bilgi istenip cevaplanan başlığı sil. İki yer konuşulduysa yalnız somut emir verilen yer kalsın; bilgi verilen yeri diğerine yapıştırma. Aynı konuşmacının peş peşe sorduğu yerler tek iş değildir.
+- Cevaptan sonra kalan somut emir varsa o emri ayrı kart olarak bırak; soyutlaştırma.
+- Üyenin oylanmayan “uygun görüyoruz / öneriyoruz” işlemini aksiyona çevirme.
+- Aynı işin kopyasını sil. Farklı yer adı taşıyan kartları birleştirme. İki yer “güvenlik” temasında olsa bile tek kart yapma.
+- Karar listesini actions’a kopyalama.
+- assignee her zaman null.
 
 ÖZET:
 - Üç alan: summary_frame, summary_agenda, summary_close. Başlığı metnin içine yazma.
 - Üç bölüm de dolu olsun. Çerçeve ve Sonuç’u birer cümleye indirme. Gündem’e ham dilimleri alt alta yapıştırma.
 - Transkriptte geçmeyen başlık kelimelerini özete sokma.
 - Dilimler örtüşür; aynı konuyu iki kez yazma. Her madde tek paragraf.
-- Yoklama, ekrana yansıtma, mikrofon gibi usulü yazma.
 - ISO tarih yasak.
 - summary_frame: 4–6 cümle. Kim konuştu, kayıt ne üzerine, transkriptteki konular.
 - summary_agenda: her konu 4–7 cümle (kim ne dedi, itiraz, varılan nokta). Karar listesini kopyalama.
@@ -104,9 +132,10 @@ AKSİYONLAR:
 - Uydurma yok. Markdown yok.
 """
 
+
 ANALYSIS_PROMPT_EN = """You are a senior meeting rapporteur for AI-SCRIBE. Read the transcript start to finish; do not skip or compress events away.
 
-The transcript is the only source. The user title is metadata; do not turn anything from the title into an event, topic, deadline, or decision unless it was spoken.
+The recording can be any kind of conversation. Do not assume a type. The transcript is the only source. The user title is metadata; do not turn anything from the title into an event, topic, deadline, or decision unless it was spoken.
 
 JSON order: decisions first, then actions, then summary.
 
@@ -116,15 +145,24 @@ Empty/nonsense audio: decisions [], actions [], summary 1-2 sentences.
 
 If there is dialogue:
 
-- decisions: EVERY decision taken. No cap. Adopted, rejected, unanimous, referred, appointment, authority, protocol, purchase, agenda item — each as its own item.
-  An action does not replace a decision. If something was agreed and also appears as an action, keep it as a decision too.
-  “the meeting ended / closed with remarks” is not a decision. One sentence. Narrow source_seq_start / source_seq_end.
+- decisions: EVERY outcome the group adopted, rejected, or chose. No cap. Distinct outcomes stay separate.
+  “the meeting ended” is not a decision.
+  If people, amounts, places, or identifiers were spoken, keep them in the sentence. Do not collapse named people into “the relevant parties were chosen”. If a merge would drop names, keep the items separate.
+  A decision is the result reached in the room (adopted / rejected / chosen). An unvoted “do it this way / you two work on this” is an action, not a decision.
+  Do not list the same fact as both a decision and an action.
+  One sentence. Narrow source_seq_start / source_seq_end.
   If none were taken, return [].
 
-- actions: Only work that this transcript says will be done. Do not copy actions from another recording.
-  No cap. Do not merge into a short list.
-  description: a concrete task.
-  assignee: always null. Do not assign owners. due_date: only an explicit date. notes: one sentence or "".
+- actions: Work remaining AFTER the meeting. The card must come from B assigning or taking ownership, not from A merely asking.
+  If ownership or deliverable is unclear, do not write a card.
+  Written-report / written-reply items read in one sitting are one packet even if directorates differ: one card; list sub-items in notes.
+  Preserve concrete verbs (write, fence, prepare); do not soften them to “review / evaluate”.
+  Do not write cards for pure questions, complaints, allegations, motion text, status updates, or unvoted “please consider this”.
+  If someone asked for a briefing and it was answered in-room, do not keep a follow-up card. If a concrete remaining job is then assigned, keep only that job.
+  Do not turn implementation of a voted agenda item into an action; leave it as a decision.
+  Do not glue different places into one card. Remove duplicates of the same job.
+  description: concrete task sentence. notes: context for that task only.
+  assignee: always null. due_date: only when explicitly spoken.
 
 - summary: A three-part narrative. Do not copy the decision list; narrate what was said.
   Context: 4–6 sentences. Who spoke, what the recording is about, topics from the transcript.
@@ -145,48 +183,138 @@ Write section, decisions, and actions in English.
 JSON: decisions, actions, section.
 
 DECISION (outcome, not procedure):
-- Write: adopted, rejected, referred, appointment, elected person, authority, protocol, purchase, grant, formal approval.
-- The RESULT of a vote/election is one decision (or one per winner). “Murat Yildiz was elected to the Climate Commission” is enough.
-- Do NOT write as separate decisions: put names on screen, start the vote, read nominees, roll call, microphone, break, “let’s draw lots”, every sentence of a “vote again” debate. If procedure is discussed, at most one sentence; the actual result is separate.
-- Different commission / different person / different agenda item stay SEPARATE. “the meeting ended” is not a decision.
+- Write: an outcome actually reached in this chunk (adopted / rejected / chosen).
+- If people, amounts, places, or identifiers were spoken, keep them; do not rewrite names as “the relevant parties”.
+- The RESULT of one process is one item (or one per distinct winner/topic).
+- Do NOT write as separate decisions: setup, a break, how the outcome was reached, every in-between sentence. If procedure is discussed, at most one sentence; the actual result is separate.
+- Assigned follow-up work and an unvoted “do it this way” are actions, not decisions. Do not list the same fact in both lists.
+- Different person / different topic stay SEPARATE. “the meeting ended” is not a decision.
 - One sentence. source_seq_start / source_seq_end only # numbers in this chunk.
 
 ACTION (work that remains AFTER the meeting):
-- Write: prepare a letter/approval, notify, payment, document, send to another body, report to a later meeting, follow-up.
-- Do NOT write: things done in the room now — holding a vote, putting names on screen, drawing lots, naming candidates, starting an election in this session. Those are not task cards.
-- Do not repeat the same job. description is concrete. notes give a bit of context (1–2 sentences). assignee always null. due_date only if an explicit date.
+- If ownership or deliverable is unclear, do not write a card.
+- A card must represent B assigning or taking ownership of a deliverable.
+- Written-report / written-reply items read as one packet in this chunk are one card; list sub-items in notes.
+- Keep the original concrete action verb; do not soften it to review/evaluate.
+- Do not write cards for questions, complaints, allegations, motion text, status updates, or unvoted “please consider this”.
+- If a briefing was asked and answered in-room, drop it; keep only a concrete remaining job if one is then assigned.
+- Do not turn voted-item implementation into an action.
+- Do not duplicate decisions as actions.
+- Do not glue different places into one card. Remove duplicates.
+- description stays concrete; notes stay tied to that card; assignee is null.
 
 section: Narrative of this chunk. At least 3 paragraphs, do not keep it short. No markdown, no Context/Agenda/Outcome headings.
 For each topic: what was said, who said it. Do not invent a decision if there was none. Do not take topics from the title if they are not in the transcript.
 """
 
-REFINE_PROMPT_EN = """Raise the raw extraction to minute quality. Invent no new events. Do not drop a distinct agenda item.
+REFINE_PROMPT_EN = """Tighten the raw extraction. Invent no new events. Do not drop a distinct topic.
 
 Write every summary field in English.
 
 DECISIONS:
-- Merge the steps of one election/vote. Write the result: who was elected, what was adopted/rejected/referred.
-- Bad example: separate items “a vote was held”, “it was a tie”, “draw lots”, “the MHP chair should draw”, “it was recorded”.
-- Good example: “Murat Yildiz was elected to the Climate Change and Environment Commission (lots after a tie).”
-- Different commissions and different winners stay SEPARATE decisions.
+- Merge the steps of one outcome. Write the result: what was adopted/rejected; keep named people, amounts, places, identifiers.
+- A merge that drops names is wrong; then keep the items separate. Separate elections stay separate, or one sentence with every name.
+- Bad: listing the process as separate items.
+- Good: one result sentence. Distinct topics stay separate.
+- Move assigned follow-up work and an unvoted “do it this way” to actions; do not leave it as a decision. Do not keep the same fact in both lists.
 - source_seq_start / source_seq_end come from the span of the merged raw items.
 
 ACTIONS:
-- Only work to be done after the meeting. Delete in-room voting, screen display, lots, reading nominees.
-- Merge the same follow-up into one item; keep notes a bit fuller (which unit, what will be requested).
-- assignee always null. Do not name an owner.
+- Written-report / written-reply rows read in one sitting are ONE packet even if directorates differ: one card, sub-items in notes. Do not keep one card per directorate.
+- Drop a card unless assignment or deliverable is explicit.
+- The card must represent B assignment/ownership. Keep concrete verbs; do not soften them.
+- Drop deferrals, status updates, questions, complaints, allegations, motion text, and unvoted “please consider this”.
+- If a briefing was asked and answered in-room, drop the briefing. Keep a remaining concrete order if one was then assigned; do not drop that order as “just a briefing” and do not glue it into the report packet.
+- Do not turn voted-item implementation into an action.
+- Delete duplicates. Do not glue different places’ remaining orders into one card.
+- Do not copy the decision list into actions.
+- assignee always null.
 
 SUMMARY:
 - Three fields: summary_frame, summary_agenda, summary_close. Do not write the heading inside the text.
 - All three must be filled. Do not shrink Context and Outcome to one sentence. Do not paste raw chunks into Agenda.
 - Do not put title-only wording into the summary if it was not spoken.
 - Chunks overlap; do not write the same topic twice. One paragraph per item.
-- Do not write procedure such as roll call, screen display, microphone.
 - ISO dates forbidden.
 - summary_frame: 4–6 sentences. Who spoke, what the recording is about from the transcript.
 - summary_agenda: each topic 4–7 sentences (who said what, pushback, where it landed). Do not copy the decision list.
 - summary_close: 4–6 sentences. The actual close in the transcript. Do not write an empty closing line.
 - No invention. No markdown.
+"""
+
+
+ACTION_DEDUP_PROMPT = """Aksiyon listesini yalnız kendi içinde süz.
+
+Kurallar:
+- Ham listeyi geri verme; yalnız nihai listeyi ver.
+- Aynı oturumda okunan yazılı rapor/cevap kalemleri konu başlıkları farklı görünse de TEK karta indir; alt başlıkları notes’ta sırala.
+- Aynı işin kopyasını/dar-geniş tekrarını tek karta indir.
+- Karar cümlesini ve oylanmış maddenin uygulama adımını görev kartına çevirme.
+- Oylanmamış önerge metnini ve önergenin grupta görüşülmesini çıkar.
+- Odada bilgi istenip cevaplanan başlığı çıkar. Cevaptan sonra kalan somut emir varsa o emri bırak; rapor paketine yapıştırma.
+- Farklı yer adı taşıyan kartları birleştirme. Aynı tema (güvenlik, rapor) olsa bile mahalle/yer birleştirmek yasak. Aynı konuşmacının peş peşe sorduğu iki yer tek kart olmaz.
+- Somut fiili koru, yumuşatma.
+- Yeni kart ekleme; yalnız birleştir, böl veya çıkar.
+
+JSON: actions. assignee null. due_date yalnız listede açık tarih varsa.
+"""
+
+ACTION_QA_PROMPT = """Aksiyonları son kalite kontrolünden geçir. Transkript kanıtını esas al.
+Yeni iş uydurma. Listedeki konuyu başka bir gündem maddesine çevirme. Girdide yoksa yeni kart ekleme; yalnız birleştir veya çıkar.
+
+Zorunlu:
+1) Aynı oturumda okunan yazılı rapor/cevap kartlarını, konu başlıkları farklı görünse de TEK karta birleştir. Alt başlıkları notes’ta sırala. Bunu atlama.
+2) Odada cevaplanan brifing kartını çıkar. Cevaplanmış bilgi talebini sonradan “yazılı rapor sunulsun” kartına çevirme. Ana fiili bilgi vermek / gözden geçirmek / incelemek olan ve somut emri olmayan kartı çıkar.
+3) Kartta iki yer adı varsa (ve/ile bağlacı) birleştirmedir. Kart sayısını artırma. Yalnız somut emir verilen yer kalsın; bilgi verilen yer adını başlıktan ve notes’tan sil.
+4) Salt iddia üzerine “inceleme başlatın” kartı yazma. Somut teslim yoksa kart değildir.
+5) Oylanmamış önergeyi çıkar. Kartın bütün işi bir önergeyi grupta veya komisyonda görüşmekse çıkar; bu teslim değil ertelemedir.
+
+Korunacak:
+- Brifingden sonra verilen somut emri koru. Bu emri rapor paketiyle birleştirme ve silme. Somut fiili soyutlaştırma.
+- Başkanın ayrı bir konu için “çalışın / başlayalım” dediği iş. Bunu güvenlik veya rapor kartına yapıştırma.
+- Birleştirilmiş rapor paketi.
+
+Yanlış: aynı paketin alt başlıklarını ayrı kart yapmak; cevaplanmış brifingi tutmak; iki yeri tek karta yapıştırmak.
+Doğru: tek rapor paketi + somut emir verilen ayrı iş kartları.
+
+JSON: actions. assignee null. due_date yalnız açık tarih varsa.
+"""
+
+ACTION_DEDUP_PROMPT_EN = """Filter the action list against itself.
+
+Rules:
+- Return the filtered final list, not the raw dump.
+- Merge duplicates and narrow-vs-wide restatements of the same job.
+- Written-report / written-reply items from one packet are ONE card even if directorates differ; keep sub-items in notes.
+- Do not convert decision statements or voted-item implementation into action cards.
+- Remove cards that are only questions, complaints, allegations, motion text, status updates, or unvoted “please consider this”.
+- If a briefing was asked and answered in-room, drop the briefing. Keep a remaining concrete order if one was then assigned; do not drop that order as “just a briefing”.
+- Do not merge cards that name different places. Same theme (security, reports) does not make them one job.
+- Preserve concrete action verbs.
+- If ownership or deliverable is unclear, drop the card.
+- Invent no new jobs.
+
+JSON: actions. assignee null. due_date only if an explicit date already in the list.
+"""
+
+ACTION_QA_PROMPT_EN = """Run a final quality gate on action cards. Trust the transcript evidence.
+Invent no new jobs. Do not rewrite the list into a different agenda item.
+
+Required:
+1) Merge written-report / written-reply cards into ONE card even if directorates differ. List sub-items in notes. Do not skip this.
+2) Drop a briefing that was answered in-room. Drop a card whose main verb is brief / review / look into with no remaining concrete order.
+3) If a card names two places joined by and/with, that is a glue. Do not add cards. Keep only the place that received a remaining concrete order; delete the briefed place name from the title and from notes.
+4) Do not write an “open an investigation” card from an allegation alone. “They will inform us / we will look together” is not a card without a concrete deliverable.
+5) Drop an unvoted proposal. If the whole card is “discuss this motion in the group/committee”, drop it; that is a deferral, not a deliverable.
+
+Keep:
+- A remaining concrete order after a briefing.
+- The merged report packet.
+
+Bad: leaving report cards split; keeping an answered briefing; gluing two neighborhoods into one card.
+Good: one report-packet card plus remaining concrete-order cards.
+
+JSON: actions. assignee null. due_date only when explicitly spoken.
 """
 
 
@@ -202,7 +330,9 @@ class AnalysisError(Exception):
 
 
 class DecisionDraft(BaseModel):
-    text: str = Field(description="One clear decision sentence")
+    text: str = Field(
+        description="One sentence: the adopted/rejected/chosen result. Keep named people, amounts, and places. Not a follow-up job.",
+    )
     source_seq_start: int | None = Field(
         default=None,
         description="First transcript line # for this decision only",
@@ -226,13 +356,15 @@ class DecisionDraft(BaseModel):
 
 
 class ActionDraft(BaseModel):
-    description: str = Field(description="Concrete task; one clear sentence")
+    description: str = Field(
+        description="Follow-up someone took on or assigned after the meeting. Not a question, complaint, allegation, or 'we'll discuss later'.",
+    )
     assignee: str | None = Field(
         default=None,
         description="Always null. Do not assign an owner.",
     )
     due_date: str | None = Field(default=None, description="YYYY-MM-DD; null if no explicit date")
-    notes: str = Field(default="", description="1-2 sentences of context")
+    notes: str = Field(default="", description="Context for this job only. Do not mix in a second topic.")
 
 
 def _coerce_decision_items(value: object) -> object:
@@ -261,10 +393,10 @@ def _coerce_action_items(value: object) -> object:
 
 class ChunkDraft(BaseModel):
     decisions: list[DecisionDraft] = Field(
-        description="Outcome decisions in this chunk. Not procedural steps.",
+        description="Group outcomes in this chunk. Keep names. Assigned follow-up work belongs in actions.",
     )
     actions: list[ActionDraft] = Field(
-        description="Follow-up work after the recording. Not in-room procedure.",
+        description="Follow-up jobs someone took on or assigned. Not a question, complaint, allegation, or 'we'll discuss later'.",
     )
     section: str = Field(description="Narrative of this chunk. At least 3 paragraphs. No markdown.")
 
@@ -281,10 +413,10 @@ class ChunkDraft(BaseModel):
 
 class RefineDraft(BaseModel):
     decisions: list[DecisionDraft] = Field(
-        description="Filtered outcome decisions. No procedural steps. Distinct items stay separate.",
+        description="Adopted outcomes with names kept. Move assigned follow-up work to actions. Distinct items stay separate.",
     )
     actions: list[ActionDraft] = Field(
-        description="Follow-up work after the recording. Not in-room procedure.",
+        description="Keep assigned follow-ups. Drop questions, complaints, allegations, copies, and 'we'll discuss later'.",
     )
     summary_frame: str = Field(
         default="",
@@ -314,14 +446,39 @@ class RefineDraft(BaseModel):
         return _coerce_action_items(value)
 
 
+class ActionDedupeDraft(BaseModel):
+    actions: list[ActionDraft] = Field(
+        description="The same jobs with copies removed. Do not invent a new job. Do not merge two distinct jobs.",
+    )
+
+    @field_validator("actions", mode="before")
+    @classmethod
+    def _coerce_actions(cls, value: object) -> object:
+        return _coerce_action_items(value)
+
+
+class ActionQADraft(BaseModel):
+    actions: list[ActionDraft] = Field(
+        description=(
+            "Final action cards only. Keep explicit follow-up deliverables, remove non-action placeholders, "
+            "and merge duplicate/redundant cards without inventing new work."
+        ),
+    )
+
+    @field_validator("actions", mode="before")
+    @classmethod
+    def _coerce_actions(cls, value: object) -> object:
+        return _coerce_action_items(value)
+
+
 class AnalysisDraft(BaseModel):
     decisions: list[DecisionDraft] = Field(
         default_factory=list,
-        description="Every decision taken, rejected, or referred. Tight source_seq_start / source_seq_end.",
+        description="Every adopted/rejected/chosen result. Keep names. Tight source_seq_start / source_seq_end.",
     )
     actions: list[ActionDraft] = Field(
         default_factory=list,
-        description="Work from this transcript only. Do not copy from another recording.",
+        description="Follow-up jobs from this transcript. Not a question, complaint, allegation, or 'we'll discuss later'.",
     )
     summary: str = Field(
         description="Three-part narrative. Do not collapse into one paragraph."
@@ -452,6 +609,78 @@ def match_decision_span(
     return center_seq, center_seq
 
 
+def _match_action_seqs(text: str, lines: list[Transcript], *, limit: int = 3) -> list[tuple[int, int]]:
+    keys = _tokens(text)
+    if not keys or not lines:
+        return []
+    scored: list[tuple[int, int]] = []
+    for row in lines:
+        seq = getattr(row, "seq", None)
+        hay = (getattr(row, "text", None) or "")
+        if seq is None or not isinstance(hay, str):
+            continue
+        hay = hay.casefold()
+        score = 0
+        for key in keys:
+            if key not in hay:
+                continue
+            score += 2 if len(key) >= 8 else 1
+        if score > 0:
+            scored.append((seq, score))
+    if not scored:
+        return []
+    scored.sort(key=lambda item: item[1], reverse=True)
+    needed = 2 if len(keys) >= 5 else 1
+    if scored[0][1] < needed:
+        return []
+    picked: list[tuple[int, int]] = []
+    for seq, score in scored:
+        if any(abs(seq - prev) < 20 for prev, _ in picked):
+            continue
+        picked.append((seq, score))
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _transcript_window(lines: list[Transcript], center_seq: int, *, before: int = 3, after: int = 4) -> list[Transcript]:
+    seq_to_idx = {getattr(row, "seq", None): idx for idx, row in enumerate(lines)}
+    center_idx = seq_to_idx.get(center_seq)
+    if center_idx is None:
+        return []
+    start = max(0, center_idx - before)
+    end = min(len(lines), center_idx + after + 1)
+    return lines[start:end]
+
+
+def _format_action_evidence(actions: list[ActionResult], lines: list[Transcript]) -> str:
+    if not actions:
+        return _none_mark()
+    blocks: list[str] = []
+    for index, item in enumerate(actions, start=1):
+        query = f"{item.description} {item.notes or ''}".strip()
+        matches = _match_action_seqs(query, lines, limit=3)
+        if not matches:
+            evidence_block = _none_mark()
+        else:
+            parts: list[str] = []
+            for seq, score in matches:
+                excerpt = _transcript_text(_transcript_window(lines, seq, before=4, after=6))
+                parts.append(f"candidate_seq: #{seq} (score={score})\n{excerpt}")
+            evidence_block = "\n\n".join(parts)
+        blocks.append(
+            "\n".join(
+                (
+                    f"{index}) description: {item.description}",
+                    f"notes: {item.notes or _none_mark()}",
+                    "candidate_evidence:",
+                    evidence_block,
+                )
+            )
+        )
+    return "\n\n---\n\n".join(blocks)
+
+
 def _fmt_ts(seconds: int) -> str:
     minutes, secs = divmod(max(0, int(seconds)), 60)
     hours, minutes = divmod(minutes, 60)
@@ -506,40 +735,6 @@ def _iter_chunks(lines: list[Transcript]) -> list[list[Transcript]]:
 
 def _norm_key(text: str) -> str:
     return " ".join((text or "").casefold().split())
-
-
-def _jaccard(a: str, b: str) -> float:
-    left, right = set(_tokens(a)), set(_tokens(b))
-    if not left or not right:
-        return 0.0
-    return len(left & right) / len(left | right)
-
-
-def _decision_dup(a: DecisionResult, b: DecisionResult) -> bool:
-    if _norm_key(a.text) == _norm_key(b.text):
-        return True
-    sa, sb = a.source_seq, b.source_seq
-    close = sa is not None and sb is not None and abs(sa - sb) <= 12
-    return close and _jaccard(a.text, b.text) >= 0.88
-
-
-def _action_dup(a: ActionResult, b: ActionResult) -> bool:
-    if _norm_key(a.description) == _norm_key(b.description):
-        return True
-    return _jaccard(a.description, b.description) >= 0.93
-
-
-def _merge_decisions(items: list[DecisionResult]) -> list[DecisionResult]:
-    kept: list[DecisionResult] = []
-    for item in items:
-        hit = next((row for row in kept if _decision_dup(row, item)), None)
-        if hit is None:
-            kept.append(item)
-            continue
-        if len(item.text) > len(hit.text):
-            kept[kept.index(hit)] = item
-    kept.sort(key=lambda row: (row.source_seq is None, row.source_seq or 0))
-    return kept
 
 
 def _title_meta(title: str) -> str:
@@ -812,15 +1007,15 @@ def _is_transient_gemini(text: str) -> bool:
 TModel = TypeVar("TModel", bound=BaseModel)
 
 _EN_FIELD_DESC = {
-    "text": "One clear decision sentence",
+    "text": "One sentence: the adopted/rejected/chosen result. Keep named people, amounts, and places. Not a follow-up job.",
     "source_seq_start": "First transcript line # for this decision only",
     "source_seq_end": "Last transcript line # for this decision only; keep the span tight",
-    "description": "Concrete task; one clear sentence",
+    "description": "Follow-up someone took on or assigned after the meeting. Not a question, complaint, or allegation.",
     "assignee": "Always null. Do not assign an owner.",
     "due_date": "YYYY-MM-DD; null if no explicit date",
     "notes": "1-2 sentences of context",
-    "decisions": "Outcome decisions. Not procedural steps. Distinct items stay separate.",
-    "actions": "Follow-up work after the recording. Not in-room procedure.",
+    "decisions": "Group outcomes. Keep names. Assigned follow-up work belongs in actions.",
+    "actions": "Follow-up jobs someone took on or assigned. Not a question, complaint, allegation, or 'we'll discuss later'.",
     "section": "Narrative of this chunk. At least 3 paragraphs. No markdown.",
     "summary_frame": "Context, 4–6 sentences from the transcript. Do not write the heading.",
     "summary_agenda": "Agenda. Do not paste chunks. 4–7 sentences per topic. Do not write the heading.",
@@ -1138,7 +1333,7 @@ def _refine_extracted(
             openai_key=openai_key,
             max_output_tokens=8192,
             on_busy=on_busy,
-            waits=(0, 6),
+            waits=(0, 8, 16),
         )
         if current_lang.get() == "en" and _looks_turkish(
             " ".join(
@@ -1158,7 +1353,7 @@ def _refine_extracted(
                 openai_key=openai_key,
                 max_output_tokens=8192,
                 on_busy=on_busy,
-                waits=(0, 6),
+                waits=(0, 8, 16),
             )
     except AnalysisError:
         logger.exception("Refine pass failed; keeping chunk results")
@@ -1167,6 +1362,9 @@ def _refine_extracted(
     next_actions: list[ActionResult] = []
     seen: set[str] = set()
     _append_actions(refined.actions, next_actions, seen, allowed)
+    if actions and not next_actions:
+        logger.warning("Refine wiped actions; keeping chunk results")
+        next_actions = actions
     if decisions and not next_decisions:
         logger.warning("Refine wiped decisions; keeping chunk results")
         next_decisions = decisions
@@ -1201,6 +1399,105 @@ def _refine_extracted(
         "yes" if polished else "keep",
     )
     return next_decisions, next_actions, polished
+
+
+def _dedupe_actions_llm(
+    actions: list[ActionResult],
+    *,
+    gemini_key: str,
+    openai_key: str,
+    allowed: dict[str, str],
+    on_busy: Callable[[int], None] | None,
+    on_progress: Callable[[str], None] | None,
+) -> list[ActionResult]:
+    if len(actions) <= 1:
+        return actions
+    if on_progress:
+        on_progress(
+            "Aksiyon kopyaları ayıklanıyor…"
+            if current_lang.get() != "en"
+            else "Removing duplicate tasks…"
+        )
+    prompt_core = ACTION_DEDUP_PROMPT_EN if current_lang.get() == "en" else ACTION_DEDUP_PROMPT
+    listing = _format_raw_actions(actions)
+    if current_lang.get() == "en":
+        prompt = f"{prompt_core}\n\nAction list:\n{listing}\n"
+    else:
+        prompt = f"{prompt_core}\n\nAksiyon listesi:\n{listing}\n"
+    try:
+        draft = _complete_json(
+            prompt,
+            ActionDedupeDraft,
+            gemini_key=gemini_key,
+            openai_key=openai_key,
+            max_output_tokens=4096,
+            on_busy=on_busy,
+            waits=(0, 8, 16),
+        )
+    except AnalysisError:
+        logger.exception("Action dedupe pass failed; keeping list")
+        return actions
+    next_actions: list[ActionResult] = []
+    seen: set[str] = set()
+    _append_actions(draft.actions, next_actions, seen, allowed)
+    if actions and not next_actions:
+        logger.warning("Action dedupe wiped the list; keeping prior actions")
+        return actions
+    logger.warning("Action dedupe %s→%s", len(actions), len(next_actions))
+    return next_actions
+
+
+def _qa_actions_llm(
+    actions: list[ActionResult],
+    *,
+    lines: list[Transcript],
+    gemini_key: str,
+    openai_key: str,
+    allowed: dict[str, str],
+    on_busy: Callable[[int], None] | None,
+    on_progress: Callable[[str], None] | None,
+) -> list[ActionResult]:
+    if not actions:
+        return actions
+    if on_progress:
+        on_progress(
+            "Aksiyonlar son kontrolden geçiyor…"
+            if current_lang.get() != "en"
+            else "Final action quality pass…"
+        )
+    prompt_core = ACTION_QA_PROMPT_EN if current_lang.get() == "en" else ACTION_QA_PROMPT
+    listing = _format_raw_actions(actions)
+    evidence = _format_action_evidence(actions, lines)
+    if current_lang.get() == "en":
+        prompt = f"{prompt_core}\n\nAction list:\n{listing}\n\nTranscript evidence:\n{evidence}\n"
+    else:
+        prompt = f"{prompt_core}\n\nAksiyon listesi:\n{listing}\n\nTranskript kanıtı:\n{evidence}\n"
+    try:
+        draft = _complete_json(
+            prompt,
+            ActionQADraft,
+            gemini_key=gemini_key,
+            openai_key=openai_key,
+            max_output_tokens=4096,
+            on_busy=on_busy,
+            waits=(0, 8, 16),
+        )
+    except AnalysisError:
+        logger.exception("Action QA pass failed; keeping list")
+        return actions
+    next_actions: list[ActionResult] = []
+    seen: set[str] = set()
+    _append_actions(draft.actions, next_actions, seen, allowed)
+    if actions and not next_actions:
+        logger.warning("Action QA wiped the list; keeping prior actions")
+        return actions
+    prior_keys = {tok for item in actions for tok in _tokens(f"{item.description} {item.notes or ''}")}
+    next_keys = {tok for item in next_actions for tok in _tokens(f"{item.description} {item.notes or ''}")}
+    if prior_keys and next_keys and len(prior_keys & next_keys) < 2:
+        logger.warning("Action QA replaced the list with unrelated cards; keeping prior actions")
+        return actions
+    logger.warning("Action QA %s→%s", len(actions), len(next_actions))
+    return next_actions
 
 
 def analyze_transcript(
@@ -1306,7 +1603,7 @@ def _analyze_transcript(
                 openai_key=openai_key,
                 max_output_tokens=8192,
                 on_busy=on_busy,
-                waits=(0, 6),
+                waits=(0, 8, 16),
             )
             if current_lang.get() == "en" and _looks_turkish(chunk.section or ""):
                 logger.warning("Chunk %s/%s returned the wrong language; retrying in English", index, total)
@@ -1317,7 +1614,7 @@ def _analyze_transcript(
                     openai_key=openai_key,
                     max_output_tokens=8192,
                     on_busy=on_busy,
-                    waits=(0, 6),
+                    waits=(0, 8, 16),
                 )
         except AnalysisError:
             failed += 1
@@ -1331,17 +1628,8 @@ def _analyze_transcript(
     if failed == total:
         raise AnalysisError("Analiz dilimlerinin hiçbiri tamamlanamadı.")
 
-    decisions = _merge_decisions(draft_decisions)
-    actions: list[ActionResult] = []
-    action_kept: set[str] = set()
-    for item in action_rows:
-        if any(_action_dup(item, prev) for prev in actions):
-            continue
-        key = _norm_key(item.description)
-        if key in action_kept:
-            continue
-        action_kept.add(key)
-        actions.append(item)
+    decisions = draft_decisions
+    actions = action_rows
 
     summary = _assemble_summary(
         title=title,
@@ -1364,6 +1652,23 @@ def _analyze_transcript(
     )
     if polished:
         summary = maybe_fix_i(polished)
+    actions = _dedupe_actions_llm(
+        actions,
+        gemini_key=gemini_key,
+        openai_key=openai_key,
+        allowed=allowed,
+        on_busy=on_busy,
+        on_progress=on_progress,
+    )
+    actions = _qa_actions_llm(
+        actions,
+        lines=lines,
+        gemini_key=gemini_key,
+        openai_key=openai_key,
+        allowed=allowed,
+        on_busy=on_busy,
+        on_progress=on_progress,
+    )
 
     logger.warning(
         "Chunked analysis lines=%s chunks=%s failed=%s summary_len=%s decisions=%s actions=%s",

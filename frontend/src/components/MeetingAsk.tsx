@@ -3,7 +3,8 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { askMeeting, type AskResult } from "@/lib/api";
-import { formatTimestamp } from "@/lib/demo-data";
+import { formatTimestamp } from "@/lib/dates";
+import { MarkdownBody } from "@/components/MarkdownBody";
 
 type Turn = {
   question: string;
@@ -133,7 +134,7 @@ export function MeetingAsk({
               {turn.result ? (
                 <div className="flex justify-start">
                   <div className="max-w-[min(40rem,92%)] rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-3 dark:border-teal-800/50 dark:bg-teal-950/50">
-                    <p className="text-sm leading-7 break-words text-slate-800 dark:text-slate-100">{turn.result.answer}</p>
+                    <MarkdownBody text={turn.result.answer} />
                     {turn.result.cites.length ? (
                       <ul className="mt-3 divide-y divide-slate-200/80 border-t border-slate-200/80 dark:divide-teal-900/50 dark:border-teal-900/50">
                         {turn.result.cites.map((cite, index) => (

@@ -10,3 +10,4 @@ google-genai>=1.40.0
 python-dotenv>=1.0.1
 bcrypt>=4.2.0
 PyJWT>=2.10.0
+pytest>=8.3.0

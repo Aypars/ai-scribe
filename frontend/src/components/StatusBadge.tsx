@@ -1,5 +1,5 @@
 import type { MeetingStatus, TaskStatus } from "@/lib/api";
-import { dueRemainingLabel, dueTone, formatDay } from "@/lib/demo-data";
+import { dueRemainingLabel, dueTone, formatDay } from "@/lib/dates";
 
 const meetingStyles: Record<MeetingStatus, string> = {
   uploaded: "bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200",

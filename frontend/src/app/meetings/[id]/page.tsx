@@ -30,7 +30,7 @@ import {
   type TranscriptFlag,
   type TranscriptLine,
 } from "@/lib/api";
-import { dateOnly, dueTone, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/demo-data";
+import { dateOnly, dueTone, formatDay, formatDuration, formatTimestamp, nowDatetimeLocal, todayISO } from "@/lib/dates";
 import { ExportMeetingDialog } from "@/components/ExportMeetingDialog";
 import { MeetingAsk } from "@/components/MeetingAsk";
 import { downloadMeetingReport, previewMeetingReport } from "@/lib/export-meeting";
@@ -397,15 +397,39 @@ function stripGuessMark(name: string): string {
   return name.replace(/\s*\?+\s*$/, "").trim();
 }
 
+function nameKey(name: string): string {
+  return name.trim().toLocaleLowerCase("tr-TR");
+}
+
+function uniqueNames(groups: string[][]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const group of groups) {
+    for (const raw of group) {
+      const name = raw.trim();
+      const key = nameKey(name);
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+function displayAttendeeNames(named: string[], speakers: { name: string }[]): string | null {
+  const names = uniqueNames([
+    named,
+    speakers.map((row) => stripGuessMark(row.name) || row.name),
+  ]);
+  return names.length ? names.join(", ") : null;
+}
+
 function isGuessName(name: string | null | undefined): boolean {
   return Boolean(name && /\S\s*\?+\s*$/.test(name));
 }
 
-function isPendingSpeaker(name: string, lines: TranscriptLine[]): boolean {
-  return (
-    isGuessName(name) ||
-    lines.some((line) => line.speaker === name && line.speaker_origin && line.speaker !== line.speaker_origin)
-  );
+function isPendingSpeaker(name: string, _lines: TranscriptLine[]): boolean {
+  return isGuessName(name);
 }
 
 function SpeakerGuessActions({
@@ -453,6 +477,8 @@ function SpeakerRenameBox({
   onClose,
   onSubmit,
   busy,
+  assignNames = [],
+  onAssign,
   children,
 }: {
   value: string;
@@ -460,6 +486,8 @@ function SpeakerRenameBox({
   onClose: () => void;
   onSubmit?: () => void;
   busy: boolean;
+  assignNames?: string[];
+  onAssign?: (name: string) => void;
   children: ReactNode;
 }) {
   const boxRef = useRef<HTMLDivElement>(null);
@@ -482,7 +510,7 @@ function SpeakerRenameBox({
   return (
     <div
       ref={boxRef}
-      className="absolute top-full left-0 z-20 mt-1 w-72 rounded-xl border border-slate-200 bg-white p-3 text-slate-900 shadow-lg dark:border-teal-800 dark:bg-[#0f2220] dark:text-teal-50"
+        className="absolute top-full left-0 z-20 mt-1 w-80 rounded-xl border border-slate-200 bg-white p-3 text-slate-900 shadow-lg dark:border-teal-800 dark:bg-[#0f2220] dark:text-teal-50"
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
@@ -501,6 +529,24 @@ function SpeakerRenameBox({
         placeholder="Yeni isim"
         className="h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-sm font-medium text-slate-900 outline-none placeholder:text-slate-400 focus:border-teal-600 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
       />
+      {assignNames.length && onAssign ? (
+        <div className="mt-2">
+          <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Katılımcıya ata</p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {assignNames.map((name) => (
+              <button
+                key={name}
+                type="button"
+                disabled={busy}
+                onClick={() => onAssign(name)}
+                className="h-7 max-w-full cursor-pointer truncate rounded-full border border-teal-200 bg-teal-50 px-2.5 text-xs font-medium text-teal-800 hover:bg-teal-100 disabled:opacity-50 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-100 dark:hover:bg-teal-900/50"
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="mt-2 flex flex-wrap gap-2">{children}</div>
     </div>
   );
@@ -520,6 +566,8 @@ function LineSpeaker({
   onRenameAll,
   onConfirm,
   onReject,
+  assignNames,
+  onAssign,
 }: {
   name: string;
   seq: number;
@@ -534,6 +582,8 @@ function LineSpeaker({
   onRenameAll: () => void;
   onConfirm?: () => void;
   onReject?: () => void;
+  assignNames?: string[];
+  onAssign?: (name: string) => void;
 }) {
   return (
     <div className="relative inline-flex items-center">
@@ -557,6 +607,8 @@ function LineSpeaker({
           onClose={onClose}
           onSubmit={onRenameAll}
           busy={busy}
+          assignNames={assignNames}
+          onAssign={onAssign}
         >
           <button
             type="button"
@@ -650,10 +702,15 @@ function TranscriptAudioPlayer({
   function seekTo(next: number) {
     const el = audioRef.current;
     if (!el || !Number.isFinite(next)) return;
-    const clamped = Math.min(duration || next, Math.max(0, next));
-    el.currentTime = clamped;
-    setTime(clamped);
-    onTimeUpdate(clamped);
+    const apply = () => {
+      const max = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : next;
+      const clamped = Math.min(max, Math.max(0, next));
+      el.currentTime = clamped;
+      setTime(clamped);
+      onTimeUpdate(clamped);
+    };
+    if (el.readyState >= 1) apply();
+    else el.addEventListener("loadedmetadata", apply, { once: true });
   }
 
   function skip(delta: number) {
@@ -671,7 +728,7 @@ function TranscriptAudioPlayer({
       <audio
         ref={audioRef}
         src={src ?? undefined}
-        preload="metadata"
+        preload="auto"
         className="hidden"
       />
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -825,6 +882,7 @@ export default function MeetingDetailPage() {
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
   const [selected, setSelected] = useState<ActionItem | null>(null);
   const [actionNote, setActionNote] = useState("");
+  const [actionSpeaker, setActionSpeaker] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -859,6 +917,7 @@ export default function MeetingDetailPage() {
     assignee: string;
     assignee_id: number | null;
     assigneeNote: string;
+    assigneeSpeaker: string | null;
     due_date: string;
     notes: string;
   } | null>(null);
@@ -923,7 +982,9 @@ export default function MeetingDetailPage() {
         pollRef.current = data.status === "uploaded" || matching || busy;
         setAnalysisBusy(busy);
         setMeeting(data);
-        setActionItems(data.actions.map((item) => ({ ...item })));
+        if (!busy) {
+          setActionItems(data.actions.map((item) => ({ ...item })));
+        }
         if (data.status === "uploaded") {
           const serverElapsed = data.transcription?.elapsed_seconds ?? 0;
           const fromServer = Date.now() - serverElapsed * 1000;
@@ -1016,8 +1077,13 @@ export default function MeetingDetailPage() {
     if (!el || !audioUrl || pendingSeekRef.current == null) return;
     const time = pendingSeekRef.current;
     pendingSeekRef.current = null;
-    el.currentTime = time;
-    void el.play();
+    const apply = () => {
+      el.currentTime = time;
+      void el.play();
+      setCurrentTime(time);
+    };
+    if (el.readyState >= 1) apply();
+    else el.addEventListener("loadedmetadata", apply, { once: true });
   }, [audioUrl]);
 
   useEffect(() => {
@@ -1079,6 +1145,7 @@ export default function MeetingDetailPage() {
 
   function openAction(item: ActionItem) {
     setActionNote("");
+    setActionSpeaker(null);
     setSelected({ ...item, due_date: dateOnly(item.due_date) || todayISO() });
   }
 
@@ -1152,6 +1219,7 @@ export default function MeetingDetailPage() {
         actions: updated.actions,
       });
       setActionItems(updated.actions.map((item) => ({ ...item })));
+      setAttendeeNames(parseAttendeeList(updated.named_attendees ?? ""));
       setLineEdit(null);
       setBulkEdit(null);
       toast("Konuşmacı başarıyla güncellendi");
@@ -1233,18 +1301,21 @@ export default function MeetingDetailPage() {
   async function handleRetryAnalysis() {
     if (!meeting) return;
     setError(null);
+    setDecisionView(null);
+    setSelected(null);
+    setSummaryDraft(null);
     analysisBusyRef.current = true;
     setAnalysisBusy(true);
     pollRef.current = true;
     try {
       const updated = await analyzeMeeting(meeting.meeting_id);
-      setMeeting(updated);
-      setActionItems(updated.actions.map((item) => ({ ...item })));
       const still =
         Boolean(updated.transcription?.message) &&
         updated.status !== "uploaded" &&
         !updated.transcription?.error;
+      setMeeting(updated);
       if (!still) {
+        setActionItems(updated.actions.map((item) => ({ ...item })));
         analysisBusyRef.current = false;
         setAnalysisBusy(false);
       }
@@ -1268,21 +1339,23 @@ export default function MeetingDetailPage() {
     }
     try {
       const assigned = await ensurePerson(item.assignee_id, item.assignee ?? "", actionNote);
-      const task = await createTask({
+      await createTask({
         meeting_id: meeting.meeting_id,
         title: item.description,
         assignee: assigned.assignee,
         assignee_id: assigned.assignee_id,
+        speaker_label: actionSpeaker,
         due_date: due,
         description: item.notes || item.description,
         action_seq: item.seq,
       });
-      setActionItems((prev) =>
-        prev.map((row) =>
-          row.seq === item.seq ? { ...row, task_status: task.status, due_date: due } : row,
-        ),
-      );
+      const updated = await fetchMeeting(meeting.meeting_id);
+      setMeeting(updated);
+      setActionItems(updated.actions.map((row) => ({ ...row })));
+      setAttendeeNames(parseAttendeeList(updated.named_attendees ?? ""));
       setSelected(null);
+      setActionNote("");
+      setActionSpeaker(null);
       toast("Görev başarıyla oluşturuldu");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Görev oluşturulamadı");
@@ -1303,6 +1376,7 @@ export default function MeetingDetailPage() {
       assignee: "",
       assignee_id: null,
       assigneeNote: "",
+      assigneeSpeaker: null,
       due_date: todayISO(),
       notes: "",
     });
@@ -1336,6 +1410,7 @@ export default function MeetingDetailPage() {
           title,
           assignee: assigned.assignee,
           assignee_id: assigned.assignee_id,
+          speaker_label: decisionDraft.assigneeSpeaker,
           due_date: due,
           description,
           action_seq: suggestion.seq,
@@ -1346,6 +1421,7 @@ export default function MeetingDetailPage() {
           title,
           assignee: assigned.assignee,
           assignee_id: assigned.assignee_id,
+          speaker_label: decisionDraft.assigneeSpeaker,
           due_date: due,
           description,
         });
@@ -1353,6 +1429,7 @@ export default function MeetingDetailPage() {
       const updated = await fetchMeeting(meeting.meeting_id);
       setMeeting(updated);
       setActionItems(updated.actions.map((item) => ({ ...item })));
+      setAttendeeNames(parseAttendeeList(updated.named_attendees ?? ""));
       setDecisionDraft(null);
       toast("Görev oluşturuldu");
     } catch (err: unknown) {
@@ -1428,13 +1505,17 @@ export default function MeetingDetailPage() {
         description: selected.description,
         assignee: assigned.assignee || null,
         assignee_id: assigned.assignee_id,
+        speaker_label: actionSpeaker,
         notes: selected.notes,
         due_date: selected.due_date,
       });
-      const next = { ...selected, assignee: assigned.assignee, assignee_id: assigned.assignee_id };
-      setActionItems((prev) => prev.map((item) => (item.seq === selected.seq ? next : item)));
+      const updated = await fetchMeeting(meeting.meeting_id);
+      setMeeting(updated);
+      setActionItems(updated.actions.map((row) => ({ ...row })));
+      setAttendeeNames(parseAttendeeList(updated.named_attendees ?? ""));
       setSelected(null);
       setActionNote("");
+      setActionSpeaker(null);
       toast("Aksiyon başarıyla kaydedildi");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Kaydedilemedi");
@@ -1471,11 +1552,18 @@ export default function MeetingDetailPage() {
     : splitTranscriptSentences(meeting.transcript);
   const usingOriginalLines = meeting.transcript.some((line) => line.speaker);
   const speakers = speakerStats(lines, meeting.duration, (name) => isPendingSpeaker(name, lines));
-  const attendeeValue: string | null = (meeting.named_attendees || "").trim()
-    ? meeting.named_attendees ?? null
-    : speakers.length
-      ? speakers.map((item) => item.name).join(", ")
-      : meeting.attendees;
+  const declaredAttendees = parseAttendeeList(meeting.named_attendees ?? "");
+  const attendeeValue =
+    displayAttendeeNames(declaredAttendees, speakers) ||
+    (speakers.length ? speakers.map((item) => item.name).join(", ") : meeting.attendees);
+  const pickerAttendees = uniqueNames([
+    declaredAttendees,
+    speakers.map((item) => stripGuessMark(item.name) || item.name),
+  ]);
+  function assignChoices(current: string): string[] {
+    const currentKey = nameKey(stripGuessMark(current) || current);
+    return declaredAttendees.filter((name) => nameKey(name) !== currentKey);
+  }
   const matching = isMatchingSpeakers(meeting);
   const analysisPending = pendingAnalysisCopy(meeting, analysisBusy);
   const visibleLines = lines.filter((line) => {
@@ -1499,9 +1587,13 @@ export default function MeetingDetailPage() {
       pendingSeekRef.current = time;
       return;
     }
-    el.currentTime = time;
-    void el.play();
-    setCurrentTime(time);
+    const apply = () => {
+      el.currentTime = time;
+      void el.play();
+      setCurrentTime(time);
+    };
+    if (el.readyState >= 1) apply();
+    else el.addEventListener("loadedmetadata", apply, { once: true });
   }
 
   function openDecision(item: Decision) {
@@ -1653,7 +1745,7 @@ export default function MeetingDetailPage() {
                           : "Analiz yap"}
                   </button>
                 ) : null}
-                {meeting.status === "analyzed" ? (
+                {meeting.status === "analyzed" && !analysisBusy ? (
                   <button
                     type="button"
                     disabled={exporting}
@@ -1691,11 +1783,13 @@ export default function MeetingDetailPage() {
               const count =
                 item.id === "transcript"
                   ? lines.length
-                  : item.id === "decisions"
-                    ? decisionList.length
-                    : item.id === "actions"
-                      ? actionItems.length
-                      : null;
+                  : analysisBusy
+                    ? null
+                    : item.id === "decisions"
+                      ? decisionList.length
+                      : item.id === "actions"
+                        ? actionItems.length
+                        : null;
               return (
                 <button
                   key={item.id}
@@ -1819,16 +1913,17 @@ export default function MeetingDetailPage() {
                             editing={lineEdit?.seq === line.seq}
                             value={lineName}
                             busy={speakerBusy}
-                            pending={
-                              isGuessName(speaker) ||
-                              Boolean(line.speaker_origin && line.speaker !== line.speaker_origin)
-                            }
+                            pending={isGuessName(speaker)}
                             onOpen={openLineEdit}
                             onChange={setLineName}
                             onClose={() => setLineEdit(null)}
                             onRenameLine={() => handleRenameSpeaker({ speaker: lineName, seq: line.seq })}
                             onRenameAll={() =>
                               handleRenameSpeaker({ speaker: lineName, from_speaker: speaker })
+                            }
+                            assignNames={assignChoices(speaker)}
+                            onAssign={(name) =>
+                              handleRenameSpeaker({ speaker: name, from_speaker: speaker })
                             }
                             onConfirm={() => void handleSpeakerGuess(speaker, "confirm")}
                             onReject={() => void handleSpeakerGuess(speaker, "reject")}
@@ -2001,8 +2096,34 @@ export default function MeetingDetailPage() {
                                     }
                                     if (e.key === "Escape") setBulkEdit(null);
                                   }}
+                                  placeholder="Yeni isim"
                                   className="h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-sm font-medium text-slate-900 outline-none focus:border-teal-600 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-50"
                                 />
+                                {assignChoices(item.name).length ? (
+                                  <div>
+                                    <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                                      Katılımcıya ata
+                                    </p>
+                                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                      {assignChoices(item.name).map((name) => (
+                                        <button
+                                          key={name}
+                                          type="button"
+                                          disabled={speakerBusy}
+                                          onClick={() =>
+                                            void handleRenameSpeaker({
+                                              speaker: name,
+                                              from_speaker: item.name,
+                                            })
+                                          }
+                                          className="h-7 max-w-full cursor-pointer truncate rounded-full border border-teal-200 bg-white px-2.5 text-xs font-medium text-teal-800 hover:bg-teal-100 disabled:opacity-50 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-100 dark:hover:bg-teal-900/50"
+                                        >
+                                          {name}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : null}
                                 <div className="flex gap-2">
                                   <button
                                     type="button"
@@ -2138,6 +2259,8 @@ export default function MeetingDetailPage() {
                     </button>
                   </div>
                 </div>
+              ) : analysisBusy ? (
+                <p className="text-sm text-slate-400">{analysisPending}</p>
               ) : summary ? (
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 px-5 py-5 dark:border-teal-800/50 dark:bg-teal-950/40">
                   <div className="space-y-4 text-sm leading-7 text-slate-800 dark:text-slate-200">
@@ -2190,7 +2313,7 @@ export default function MeetingDetailPage() {
             </>
           )}
 
-          {tab === "decisions" && decisionView ? (
+          {tab === "decisions" && decisionView && !analysisBusy ? (
             <>
               <button
                 type="button"
@@ -2301,9 +2424,9 @@ export default function MeetingDetailPage() {
           ) : tab === "decisions" ? (
             <>
               <p className="mb-4 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">Alınan kararlar</p>
-              {decisionList.length === 0 ? (
+              {analysisBusy || decisionList.length === 0 ? (
                 <p className="text-sm text-slate-400">
-                  {meeting.status === "transcribed" || meeting.status === "uploaded" || analysisBusy
+                  {analysisBusy || meeting.status === "transcribed" || meeting.status === "uploaded"
                     ? analysisPending
                     : "Alınan karar yok."}
                 </p>
@@ -2415,9 +2538,9 @@ export default function MeetingDetailPage() {
               <p className="mb-4 text-xs font-semibold tracking-[0.14em] text-slate-600 uppercase dark:text-teal-300">
                 Aksiyon maddeleri
               </p>
-              {actionItems.length === 0 ? (
+              {analysisBusy || actionItems.length === 0 ? (
                 <p className="text-sm text-slate-400">
-                  {meeting.status === "transcribed" || meeting.status === "uploaded" || analysisBusy
+                  {analysisBusy || meeting.status === "transcribed" || meeting.status === "uploaded"
                     ? analysisPending
                     : "Aksiyon maddesi yok."}
                 </p>
@@ -2574,13 +2697,14 @@ export default function MeetingDetailPage() {
               <label className="flex flex-col gap-1.5">
                 <span className="font-medium text-slate-700">Sorumlu</span>
                 <PersonPicker
-                  attendeeNames={speakers.map((item) => stripGuessMark(item.name) || item.name)}
+                  attendeeNames={pickerAttendees}
                   people={meeting.people}
                   valueId={selected.assignee_id}
                   valueName={selected.assignee ?? ""}
-                  onChange={(personId, name, note) => {
+                  onChange={(personId, name, note, speakerLabel) => {
                     setSelected({ ...selected, assignee_id: personId, assignee: name });
                     setActionNote(note ?? "");
+                    setActionSpeaker(speakerLabel ?? null);
                   }}
                 />
               </label>
@@ -2685,16 +2809,17 @@ export default function MeetingDetailPage() {
               <label className="flex flex-col gap-1.5">
                 <span className="font-medium text-slate-700 dark:text-teal-100">Sorumlu</span>
                 <PersonPicker
-                  attendeeNames={speakers.map((item) => stripGuessMark(item.name) || item.name)}
+                  attendeeNames={pickerAttendees}
                   people={meeting.people}
                   valueId={decisionDraft.assignee_id}
                   valueName={decisionDraft.assignee}
-                  onChange={(personId, name, note) => {
+                  onChange={(personId, name, note, speakerLabel) => {
                     setDecisionDraft({
                       ...decisionDraft,
                       assignee_id: personId,
                       assignee: name,
                       assigneeNote: note ?? "",
+                      assigneeSpeaker: speakerLabel ?? null,
                     });
                   }}
                 />

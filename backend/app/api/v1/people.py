@@ -31,12 +31,15 @@ def create_person(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> PersonOut:
-    person = people_repo.create_person(
-        db,
-        user_id=current_user.user_id,
-        name=body.name,
-        note=body.note,
-    )
+    try:
+        person = people_repo.create_person(
+            db,
+            user_id=current_user.user_id,
+            name=body.name,
+            note=body.note,
+        )
+    except people_repo.PersonNameConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     return people_repo.to_out_in_directory(db, current_user.user_id, person)
 
 
@@ -50,12 +53,16 @@ def update_person(
     person = people_repo.get_for_user(db, current_user.user_id, person_id)
     if person is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Kişi bulunamadı")
-    if body.name is not None:
-        person.name = body.name.strip()
-    if "note" in body.model_fields_set:
-        person.note = (body.note or "").strip() or None
-    db.commit()
-    db.refresh(person)
+    try:
+        person = people_repo.update_person(
+            db,
+            person,
+            name=body.name,
+            note_set="note" in body.model_fields_set,
+            note=body.note,
+        )
+    except people_repo.PersonNameConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     return people_repo.to_out_in_directory(db, current_user.user_id, person)
 
 

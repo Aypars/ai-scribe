@@ -8,7 +8,7 @@ import { AgendaCalendar } from "@/components/AgendaCalendar";
 import { AppShell } from "@/components/AppShell";
 import { MeetingBadge, DueAlertLine } from "@/components/StatusBadge";
 import { fetchMeetings, fetchTasks, type Meeting, type Task } from "@/lib/api";
-import { countDueAlerts, formatDay, formatDuration } from "@/lib/demo-data";
+import { countDueAlerts, formatDay, formatDuration } from "@/lib/dates";
 
 export default function DashboardPage() {
   const router = useRouter();

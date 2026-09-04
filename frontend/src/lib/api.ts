@@ -206,8 +206,12 @@ export async function fetchMeetingAudioUrl(id: number): Promise<string> {
     headers: authHeader(),
   });
   if (!response.ok) throw new Error(await readError(response));
-  const blob = await response.blob();
-  return URL.createObjectURL(blob);
+  const mime = (response.headers.get("content-type") || "audio/mpeg").split(";")[0].trim();
+  const ext = mime.includes("wav") ? "wav" : mime.includes("mp4") || mime.includes("m4a") ? "m4a" : "mp3";
+  const file = new File([await response.arrayBuffer()], `kayit.${ext}`, {
+    type: mime || "audio/mpeg",
+  });
+  return URL.createObjectURL(file);
 }
 
 export async function createMeeting(body: {
@@ -305,6 +309,7 @@ export async function updateMeetingAction(
     description?: string;
     assignee?: string | null;
     assignee_id?: number | null;
+    speaker_label?: string | null;
     due_date?: string | null;
     notes?: string | null;
   },
@@ -416,7 +421,9 @@ export async function fetchTaskBoard(): Promise<{ items: Task[]; suggestions: Su
 export async function updateTask(
   meetingId: number,
   actionSeq: number,
-  body: Partial<Pick<Task, "title" | "status" | "assignee" | "assignee_id" | "due_date" | "description">>,
+  body: Partial<Pick<Task, "title" | "status" | "assignee" | "assignee_id" | "due_date" | "description">> & {
+    speaker_label?: string | null;
+  },
 ): Promise<Task> {
   const response = await fetch(`${API_URL}/api/v1/tasks/${meetingId}/${actionSeq}`, {
     method: "PATCH",
@@ -440,6 +447,7 @@ export async function createTask(body: {
   title: string;
   assignee: string;
   assignee_id?: number | null;
+  speaker_label?: string | null;
   due_date: string;
   description: string;
   action_seq?: number;

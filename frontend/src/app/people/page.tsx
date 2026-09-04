@@ -8,7 +8,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { DueAlertLine, DueHint, TaskBadge } from "@/components/StatusBadge";
 import { fetchMeetings, fetchPeople, fetchTasks, createPerson, createTask, updatePerson, deletePerson, type Meeting, type Person, type Task } from "@/lib/api";
 import { SelectWrap } from "@/components/FilterSelect";
-import { byDueDate, countDueAlerts, dateOnly, dueRemainingLabel, dueTone, formatDay, todayISO } from "@/lib/demo-data";
+import { byDueDate, countDueAlerts, dateOnly, dueRemainingLabel, dueTone, formatDay, todayISO } from "@/lib/dates";
 import { ExportFormatDialog } from "@/components/FormatPicker";
 import { downloadPeopleRoster, downloadPersonReport } from "@/lib/export-lists";
 import type { ExportFormat } from "@/lib/export-office";
@@ -77,6 +77,10 @@ function meetingsOf(person: Person, assigned: Task[], catalog: Meeting[]): Perso
     });
   }
   return [...seen.values()].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+}
+
+function samePersonName(left: string, right: string): boolean {
+  return left.trim().toLocaleLowerCase("tr") === right.trim().toLocaleLowerCase("tr");
 }
 
 function dueLineClass(iso: string): string {
@@ -250,6 +254,10 @@ export default function PeoplePage() {
       toast("İsim gerekli");
       return;
     }
+    if (people.some((person) => person.person_id !== selected.person_id && samePersonName(person.name, name))) {
+      toast("Bu isimde biri zaten var");
+      return;
+    }
     setSaving(true);
     try {
       const next = await updatePerson(selected.person_id, {
@@ -258,6 +266,12 @@ export default function PeoplePage() {
       });
       setPeople((prev) => prev.map((person) => (person.person_id === next.person_id ? next : person)));
       setSelected((prev) => (prev && prev.person_id === next.person_id ? { ...prev, ...next } : prev));
+      setTasks((prev) =>
+        prev.map((task) => (task.assignee_id === next.person_id ? { ...task, assignee: next.name } : task)),
+      );
+      setSelectedTask((prev) =>
+        prev && prev.assignee_id === next.person_id ? { ...prev, assignee: next.name } : prev,
+      );
       toast("Kişi güncellendi");
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "Kaydedilemedi");
@@ -293,6 +307,10 @@ export default function PeoplePage() {
     const name = createName.trim();
     if (!name) {
       toast("İsim gerekli");
+      return;
+    }
+    if (people.some((person) => samePersonName(person.name, name))) {
+      toast("Bu isimde biri zaten var");
       return;
     }
     setSaving(true);

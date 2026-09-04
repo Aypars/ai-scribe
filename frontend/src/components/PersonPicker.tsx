@@ -33,7 +33,7 @@ export function PersonPicker({
   people?: Person[];
   valueId: number | null | undefined;
   valueName: string;
-  onChange: (personId: number | null, name: string, note?: string) => void;
+  onChange: (personId: number | null, name: string, note?: string, speakerLabel?: string | null) => void;
 }) {
   const [mode, setMode] = useState<"pick" | "new" | "search">("pick");
   const [fromAttendee, setFromAttendee] = useState<string | null>(null);
@@ -102,16 +102,17 @@ export function PersonPicker({
     setFromAttendee(name || null);
     setNewName(name);
     setNewNote("");
-    onChange(null, name, "");
+    onChange(null, name, "", name || null);
     void ensureDirectory();
   }
 
   function linkPerson(person: Person) {
+    const bind = fromAttendee;
     setMode("pick");
     setFromAttendee(null);
     setNewName("");
     setNewNote("");
-    onChange(person.person_id, person.name);
+    onChange(person.person_id, person.name, undefined, bind);
   }
 
   return (
@@ -220,7 +221,7 @@ export function PersonPicker({
               value={newName}
               onChange={(e) => {
                 setNewName(e.target.value);
-                onChange(null, e.target.value, newNote);
+                onChange(null, e.target.value, newNote, fromAttendee);
               }}
               placeholder="Ad"
               className={field}
@@ -229,7 +230,7 @@ export function PersonPicker({
               value={newNote}
               onChange={(e) => {
                 setNewNote(e.target.value);
-                onChange(null, newName, e.target.value);
+                onChange(null, newName, e.target.value, fromAttendee);
               }}
               placeholder="örn. Satış (isteğe bağlı)"
               className={field}

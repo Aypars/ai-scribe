@@ -9,7 +9,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { MeetingBadge } from "@/components/StatusBadge";
 import { useToast } from "@/components/Toast";
 import { deleteMeeting, fetchMeetings, type Meeting, type MeetingStatus } from "@/lib/api";
-import { formatDay, formatDuration } from "@/lib/demo-data";
+import { formatDay, formatDuration } from "@/lib/dates";
 
 const filters: { value: "all" | MeetingStatus; label: string }[] = [
   { value: "all", label: "Tümü" },

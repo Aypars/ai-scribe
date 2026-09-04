@@ -1,5 +1,5 @@
 import type { ActionItem, Decision, MeetingDetail, TranscriptLine } from "@/lib/api";
-import { formatDay, formatDuration, formatTimestamp } from "@/lib/demo-data";
+import { formatDay, formatDuration, formatTimestamp } from "@/lib/dates";
 import {
   type DocBlock,
   type ExportFormat,
@@ -347,7 +347,7 @@ function summaryBlocks(summary: string | null, copy: ExportCopy): DocBlock[] {
   for (const para of summary.split(/\n+/).map((part) => part.trim()).filter(Boolean)) {
     const key = para.toLocaleLowerCase("tr-TR");
     if (headings.has(key)) {
-      blocks.push({ kind: "h2", text: key === "gündem akışı" ? "Gündem Akışı" : para });
+      blocks.push({ kind: "h3", text: key === "gündem akışı" ? "Gündem Akışı" : para });
       continue;
     }
     blocks.push({ kind: "p", text: para });
@@ -370,7 +370,11 @@ function transcriptBlocks(lines: TranscriptLine[], copy: ExportCopy): DocBlock[]
   const blocks: DocBlock[] = [];
   for (const line of lines) {
     const who = line.speaker || "—";
-    blocks.push({ kind: "p", text: `${formatTimestamp(line.timestamp)}  ${who}\n${(line.text || "").trim()}` });
+    blocks.push({
+      kind: "quote",
+      kicker: `${formatTimestamp(line.timestamp)} · ${who}`,
+      text: (line.text || "").trim(),
+    });
   }
   return blocks;
 }
@@ -381,10 +385,12 @@ function talkShareBlocks(meeting: MeetingDetail): DocBlock[] {
   if (!rows.length) return [];
   return [
     { kind: "h2", text: copy.talkShare },
-    ...rows.map((row) => ({
-      kind: "p" as const,
-      text: `${row.name}: ${formatDuration(row.seconds, copy.locale)} · %${row.share}`,
-    })),
+    {
+      kind: "bullets",
+      items: rows.map(
+        (row) => `${row.name} — ${formatDuration(row.seconds, copy.locale)} · %${row.share}`,
+      ),
+    },
   ];
 }
 

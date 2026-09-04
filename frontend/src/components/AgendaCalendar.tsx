@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 
 import { DueHint } from "@/components/StatusBadge";
 import type { Meeting, Task } from "@/lib/api";
-import { dateOnly, dueTone, formatDay, type DueTone } from "@/lib/demo-data";
+import { dateOnly, dueTone, formatDay, type DueTone } from "@/lib/dates";
 
 const WEEKDAYS = ["Pt", "Sa", "Ça", "Pe", "Cu", "Ct", "Pz"];
 const card =

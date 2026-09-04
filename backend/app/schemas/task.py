@@ -40,6 +40,7 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     assignee: str | None = None
     assignee_id: int | None = None
+    speaker_label: str | None = None
     due_date: date
     description: str = ""
     action_seq: int | None = None
@@ -50,5 +51,6 @@ class TaskUpdate(BaseModel):
     status: str | None = None
     assignee: str | None = None
     assignee_id: int | None = None
+    speaker_label: str | None = None
     due_date: date | None = None
     description: str | None = None

@@ -67,3 +67,12 @@ def delete_audio(audio_path: str | None) -> None:
     path = absolute_audio_path(audio_path)
     if path.is_file():
         path.unlink()
+    if path.suffix.lower() == ".mp3":
+        for extra in (
+            path.with_name(f"{path.stem}.seek.mp3"),
+            path.with_name(f"{path.stem}.seek.tmp.mp3"),
+            path.with_suffix(".m4a"),
+            path.with_name(f"{path.stem}.tmp.m4a"),
+        ):
+            if extra != path and extra.is_file():
+                extra.unlink()
