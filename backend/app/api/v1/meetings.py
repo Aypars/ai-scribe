@@ -25,6 +25,7 @@ from app.schemas.meeting import (
     SpeakerRenameIn,
     TranscriptEditIn,
     TranscriptLineOut,
+    TranscriptMergeIn,
 )
 from app.services.analysis import match_decision_span
 from app.services.meeting_jobs import (
@@ -327,6 +328,25 @@ def edit_transcript_line(
     )
     if meeting is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transkript satırı bulunamadı")
+    return _detail_out(db, meeting)
+
+
+@router.post("/{meeting_id}/transcript/merge", response_model=MeetingDetailOut)
+def merge_transcript_line(
+    meeting_id: int,
+    body: TranscriptMergeIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> MeetingDetailOut:
+    meeting = meetings_repo.get_for_user(db, current_user.user_id, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Toplantı bulunamadı")
+    meeting = meetings_repo.merge_transcript_with_next(db, meeting, body.seq)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Birleştirilecek sonraki satır yok",
+        )
     return _detail_out(db, meeting)
 
 

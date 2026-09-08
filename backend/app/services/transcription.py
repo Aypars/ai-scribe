@@ -443,7 +443,6 @@ def _find_whisperx() -> Path | None:
     extra = [
         desktop,
         Path.home() / "Desktop" / "whisperx-env" / "Scripts" / "whisperx.exe",
-        Path(r"C:\Users\nitro\OneDrive\Desktop\whisperx-env\Scripts\whisperx.exe"),
     ]
     return _first_existing(extra)
 

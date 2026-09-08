@@ -147,3 +147,64 @@ def test_task_due_date_rules(auth_client):
     assert board.status_code == 200
     titles = [row["title"] for row in board.json()["items"]]
     assert "Teklifi gönder" in titles
+
+
+def test_merge_transcript_lines(auth_client):
+    files = {"audio": ("demo.mp3", BytesIO(b"ID3fakeaudio"), "audio/mpeg")}
+    created = auth_client.post(
+        "/api/v1/meetings",
+        data={"title": "Birleştirme", "date": "2026-09-01T10:00:00", "language": "tr"},
+        files=files,
+    )
+    assert created.status_code == 201, created.text
+    meeting_id = created.json()["meeting_id"]
+
+    from app.core.database import SessionLocal
+    from app.models.transcript import Transcript
+    from app.repositories.meetings import dump_flags
+
+    db = SessionLocal()
+    try:
+        db.add_all(
+            [
+                Transcript(
+                    meeting_id=meeting_id,
+                    seq=1,
+                    text="Birinci cümle",
+                    timestamp=0,
+                    speaker="Ali",
+                ),
+                Transcript(
+                    meeting_id=meeting_id,
+                    seq=2,
+                    text="ikinci cümle",
+                    timestamp=4,
+                    speaker="Ali",
+                    flags=dump_flags(
+                        [{"original": "ikinci", "suggestion": "İkinci", "reason": "büyük harf"}]
+                    ),
+                ),
+                Transcript(
+                    meeting_id=meeting_id,
+                    seq=3,
+                    text="üçüncü cümle",
+                    timestamp=8,
+                    speaker="Ayşe",
+                ),
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    merged = auth_client.post(f"/api/v1/meetings/{meeting_id}/transcript/merge", json={"seq": 1})
+    assert merged.status_code == 200, merged.text
+    lines = merged.json()["transcript"]
+    assert [(row["seq"], row["text"], row["speaker"]) for row in lines] == [
+        (1, "Birinci cümle ikinci cümle", "Ali"),
+        (3, "üçüncü cümle", "Ayşe"),
+    ]
+    assert lines[0]["flags"][0]["original"] == "ikinci"
+
+    last = auth_client.post(f"/api/v1/meetings/{meeting_id}/transcript/merge", json={"seq": 3})
+    assert last.status_code == 404

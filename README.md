@@ -1,52 +1,45 @@
 # AI-SCRIBE
 
-AI-SCRIBE, toplantı sesini veya videosunu yazıya çeviren bir asistan. Konuşmacıları ayırır; sen istediğinde özet, karar ve aksiyon üretir. Transkript hazır olduktan sonra aynı kayda soru sorabilir, aksiyonları göreve çevirip kişi ve teslim tarihiyle takip edebilirsin.
+Toplantı ses ve video kayıtlarından konuşmacı ayrımlı transkript üreten, kullanıcı onayıyla özet / karar / aksiyon çıkaran ve aksiyonları görev olarak takip eden yerel asistan.
 
-Tipik sıra: **kayıt yükle → WhisperX transkript → Analiz yap → özet, kararlar, aksiyonlar.** Analiz kendiliğinden başlamaz. **Sor**, yalnızca o toplantının transkriptine bakarak cevap verir.
-
-Proje tek depoda durur: `frontend/` (Next.js), `backend/` (FastAPI) ve PostgreSQL.
-
-## Özellikler
-
-- Hesap: kayıt ol, giriş yap, şifre sıfırla (SMTP), hesap ayarları
-- Toplantı: ses (`mp3` / `wav` / `m4a`) veya video (`mp4` / `webm` / `mov`); yüklerken dil **Türkçe** veya **English**
-- Transkript, ses oynatıcı, konuşmacı eşleme, satır düzeltme
-- Analiz: özet (Çerçeve / Gündem / Sonuç), kararlar, aksiyonlar — toplantının diline göre
-- Görev panosu, kişiler, dashboard’daki takvim
-- Dışa aktarma: PDF, Word, Markdown — tarayıcıda üretilir; dil yine toplantıya göre
-- Sor: cevap yalnız bu transkriptten gelir; alıntıya tıklayınca kayıt o ana atlar
-
-Bir kişinin adını **Kişiler** sayfasından değiştirirsen, bağlı toplantılara da yansır. Transkriptteki konuşmacı etiketini değiştirmek kişi kaydının adını değiştirmez.
+İstemci (`frontend/`, Next.js), REST API (`backend/`, FastAPI) ve PostgreSQL birbirinden bağımsız süreçlerdir. Konteyner orkestrasyonu yoktur.
 
 ---
 
-## Sistem mimarisi
+## Kapsam
 
-### Teknoloji
+| Yetenek | Davranış |
+|---------|----------|
+| Yazıya çevirme | Yükleme sonrası WhisperX arka planda çalışır. Çıktı: zaman damgalı satırlar, konuşmacı etiketleri. |
+| Konuşmacı | Diarization etiketleri (`Konuşmacı A` …). Beyan edilen katılımcı adlarıyla eşleme denenir; satır veya etiket kullanıcı tarafından düzeltilir. Ardışık satırlar birleştirilebilir. |
+| Analiz | Otomatik başlamaz. Transkript hazırken `Analiz yap`: çerçeve / gündem / sonuç özeti, kararlar, aksiyon önerileri. |
+| Soru | Yanıt yalnızca o toplantının transkriptine dayanır. Alıntılar kayıt üzerinde seek eder. |
+| İş takibi | Aksiyon öneridir. Görev panosuna alınca teslim tarihi zorunludur. Kişi dizini ve takvim ayrı yüzeylerdir. |
+| Dışa aktarma | PDF, Word ve Markdown tarayıcıda üretilir. |
 
-| Katman | Teknoloji |
-|--------|-----------|
-| Arayüz | Next.js 16, React 19, Tailwind CSS 4 |
-| API | Python 3.12, FastAPI, Uvicorn, Pydantic |
-| Veritabanı | PostgreSQL (SQLAlchemy 2 + psycopg) |
-| Kimlik | JWT (HS256, 7 gün), bcrypt, `Authorization: Bearer` |
-| Konuşmayı yazıya çevirme | Bilgisayarda çalışan **WhisperX** (konuşmacı ayırmak için Hugging Face jetonu) |
-| Medya | **ffmpeg** (videodan ses alma, süre) |
-| Dil modeli | Google Gemini (`GEMINI_API_KEY`); yoksa OpenAI (`OPENAI_API_KEY`) |
-| Dosya | `backend/uploads/{user_id}/` — en fazla 500 MB |
-| Dışa aktarma | Tarayıcıda `jspdf` / `docx` / Markdown |
+Uygulama yüzeyleri: `/` (dashboard), `/meetings`, `/meetings/new`, `/meetings/[id]`, `/tasks`, `/people`, `/settings`.
 
-### Genel bakış
+Konuşmacı etiketini değiştirmek `people` kaydının adını değiştirmez. `people` adını değiştirmek bağlı görev, aksiyon ve transkript etiketlerine yansır.
+
+---
+
+## Mimari
+
+İstemci `http://localhost:3000` üzerinden JSON ve JWT ile `http://localhost:8000/api/v1` konuşur. API kayıt meta verisini PostgreSQL’e, medyayı `backend/uploads/{user_id}/` altına yazar (üst sınır 500 MB). Transkripsiyon yerel WhisperX + ffmpeg; analiz ve soru-cevap Gemini (yoksa OpenAI). CORS: `localhost:3000`, `127.0.0.1:3000` (ve 3001).
+
+Toplantı durumu: `uploaded` → `transcribed` → `analyzed`. Transkripsiyon hatası `failed`. WhisperX etiketi `people` satırı oluşturmaz; kişi görev atamasında veya Kişiler ekranından doğar.
+
+Kimlik: HS256 JWT, `sub` = `user_id`, süre 7 gün, istemcide `localStorage.access_token`. Kayıt, giriş ve şifre sıfırlama dışında tüm uçlar `Authorization: Bearer`. Başka kullanıcının kaydı 404 döner.
 
 ```mermaid
 flowchart LR
-  subgraph istemci ["Tarayıcı — Next.js :3000"]
-    UI[Sayfalar ve bileşenler]
+  subgraph istemci ["İstemci — Next.js :3000"]
+    UI[Sayfalar]
     EXP[PDF / Word / MD]
   end
 
-  subgraph api ["FastAPI :8000"]
-    R[api/v1]
+  subgraph api ["API — FastAPI :8000"]
+    R["/api/v1"]
     SVC[Servisler]
     REPO[Repository]
   end
@@ -57,79 +50,73 @@ flowchart LR
   LLM[Gemini / OpenAI]
 
   UI -->|JSON + JWT| R
-  UI -->|multipart ses/video| R
+  UI -->|ses / video| R
   EXP -.-> UI
   R --> SVC
   SVC --> REPO
   REPO --> PG
   SVC --> UP
-  SVC -->|Popen| WX
-  SVC -->|HTTPS| LLM
+  SVC --> WX
+  SVC --> LLM
 ```
-
-Ön yüz ve API ayrı süreçlerdir. Ön yüz, API’yi `NEXT_PUBLIC_API_URL` ile çağırır (varsayılan `http://localhost:8000`). CORS `http://localhost:3000` ve `http://127.0.0.1:3000` için açıktır.
-
-### Toplantı iş akışı
 
 ```mermaid
 sequenceDiagram
   participant U as Kullanıcı
-  participant FE as Next.js
+  participant FE as İstemci
   participant API as FastAPI
   participant WX as WhisperX
   participant DB as PostgreSQL
   participant LLM as Gemini / OpenAI
 
-  U->>FE: Kayıt yükle (dil, katılımcılar)
-  FE->>API: POST /api/v1/meetings (multipart)
-  API->>DB: meeting status=uploaded
-  API-->>FE: MeetingOut
-  API->>WX: arka plan transkript
-  WX-->>API: satırlar + konuşmacı etiketleri
-  API->>DB: transcripts, status=transcribed
-  Note over API: Konuşmacı eşleme (ad listesi varsa)
+  U->>FE: Kayıt yükle
+  FE->>API: POST /api/v1/meetings
+  API->>DB: status = uploaded
+  API->>WX: transkripsiyon (arka plan)
+  WX-->>API: satırlar
+  API->>DB: status = transcribed
   U->>FE: Analiz yap
   FE->>API: POST /meetings/{id}/analyze
   API->>LLM: özet / karar / aksiyon
-  LLM-->>API: JSON
-  API->>DB: analyses, decisions, actions, status=analyzed
-  U->>FE: Sor / görev ata / dışa aktar
+  API->>DB: status = analyzed
 ```
 
-Toplantı durumları: `uploaded` → `transcribed` → `analyzed`. Transkript başarısız olursa `failed`. Analiz, transkript bitmeden çalışmaz. Whisper’ın ürettiği konuşmacı etiketlerinden kişi kaydı **açılmaz**; kişi ya görev atarken ya da Kişiler sayfasından oluşur.
+Uzun işler HTTP’yi bloklamaz. İstemci `GET /api/v1/meetings/{id}` ile `status` ve `transcription` alanını yoklar.
 
-### Backend katmanları
+### Backend katmanları (`backend/app`)
 
-```
-backend/app/
-├── main.py                 FastAPI uygulaması, CORS, açılış/kapanış (şema + Whisper iptali)
-├── api/v1/                 HTTP uç noktaları
-├── schemas/                İstek ve yanıt modelleri
-├── models/                 SQLAlchemy tabloları
-├── repositories/           PostgreSQL okuma / yazma
-├── services/
-│   ├── storage.py          Yükleme, uzantı, 500 MB sınırı
-│   ├── transcription.py    WhisperX, ffmpeg, konuşmacı ayırma
-│   ├── speakers.py         Ad listesi ile Konuşmacı A/B eşleme
-│   ├── analysis.py         Özet / karar / aksiyon boru hattı
-│   ├── analysis_prompts.py Analiz prompt metinleri
-│   ├── llm.py              Gemini / OpenAI JSON çağrıları
-│   ├── meeting_jobs.py     Transkript, konuşmacı eşleme, analiz işleri
-│   ├── ask.py              Tek toplantıya soru
-│   ├── transcript_review.py
-│   ├── mail.py             Şifre sıfırlama e-postası
-│   └── meeting_lang.py     tr | en
-└── core/
-    ├── config.py           .env
-    ├── database.py         bağlantı, oturum, ensure_schema
-    └── security.py         JWT, bcrypt
-```
+| Katman | Sorumluluk |
+|--------|------------|
+| `api/v1/` | HTTP uçları |
+| `schemas/` | İstek / yanıt doğrulama |
+| `models/` | SQLAlchemy tabloları |
+| `repositories/` | Kalıcılık |
+| `services/` | Transkripsiyon, analiz, depolama, e-posta |
+| `core/` | Ayarlar, bağlantı, JWT |
 
-Uygulama açılırken `ensure_schema()` eksik kolonları ve `people` tablolarını ekler. İlk kurulumda tam şema `backend/sql/schema.sql` ile kurulur.
+`services`: `storage.py`, `transcription.py`, `speakers.py`, `analysis.py`, `analysis_prompts.py`, `llm.py`, `meeting_jobs.py`, `ask.py`, `mail.py`, `meeting_lang.py`.
 
-`--reload --reload-dir app` yalnızca geliştirme içindir. Transkript veya analiz sürerken `backend/app` altındaki bir dosyayı kaydetmek Uvicorn’u yeniden başlatır ve işi yarıda keser.
+---
 
-### Veri modeli
+## Veri modeli
+
+Şema: `backend/sql/schema.sql`. Açılışta `ensure_schema` eksik kolonları ekler.
+
+Güçlü varlıklar: `users`, `meetings`, `people`. Zayıf (tanımlayıcı) varlıklar bileşik birincil anahtar kullanır: `transcripts (meeting_id, seq)`, `decisions` / `actions (meeting_id, seq)`, `tasks (meeting_id, action_seq)`. `analyses` toplantı ile 1:1 (`PK = meeting_id`).
+
+Çoğu FK `ON DELETE CASCADE`. `actions.assignee_id` ve `tasks.assignee_id` → `people` için `ON DELETE SET NULL`. `decisions.source_seq` transkript satırına FK değildir (düzenleme / birleştirme).
+
+| Tablo | Rol |
+|-------|-----|
+| `users` | Hesap; şifre bcrypt; sıfırlama jetonu hash’li |
+| `meetings` | Başlık, tarih, dil, `audio_path`, `status` |
+| `transcripts` | Satır metni, saniye, konuşmacı, `flags` (JSON metin) |
+| `people` | Hesaba özel dizin (login değildir) |
+| `meeting_people` | N:N + `speaker_label` |
+| `analyses` | Özet |
+| `decisions` | Karar metni + transkript aralığı |
+| `actions` | Analiz önerisi; `dismissed` korunur |
+| `tasks` | Aksiyon ile 1:1; `in_progress` / `done` |
 
 ```mermaid
 erDiagram
@@ -144,93 +131,37 @@ erDiagram
   actions ||--o| tasks : gorev
   people ||--o{ actions : sorumlu
   people ||--o{ tasks : sorumlu
-
-  users {
-    int user_id PK
-    string email UK
-    string password
-  }
-  meetings {
-    int meeting_id PK
-    string status
-    string language
-    string named_attendees
-    string audio_path
-  }
-  transcripts {
-    int meeting_id PK
-    int seq PK
-    int timestamp
-    string speaker
-  }
-  people {
-    int person_id PK
-    string name
-  }
-  tasks {
-    int meeting_id PK
-    int action_seq PK
-    string status
-    date due_date
-  }
 ```
 
-- **users** — giriş hesabı. Şifre bcrypt ile tutulur; sıfırlama jetonu hash’lenerek saklanır.
-- **meetings** — başlık, tarih, dil (`tr` / `en`), senin yazdığın katılımcılar (`named_attendees`), konuşmacı özeti (`attendees`).
-- **transcripts** — toplantıya bağlı satırlar; anahtar `(meeting_id, seq)`. `timestamp` saniye cinsinden. `speaker_origin` ilk diarization etiketidir.
-- **people** — hesaba özel kişi listesi; aynı isim ikinci kez eklenemez. Bu kayıtlar giriş hesabı değildir.
-- **meeting_people** — hangi kişinin hangi toplantıda olduğu; isteğe bağlı `speaker_label`.
-- **analyses / decisions / actions** — analiz çıktısı. Aksiyon, göreve çevrilene kadar öneridir.
-- **tasks** — bir aksiyonla bire bir `(meeting_id, action_seq)`. Durum: `in_progress` veya `done`. Teslim tarihi zorunludur.
+---
 
-### Ön yüz
+## Teknoloji
 
-Sayfalar JWT’yi `localStorage` içinde `access_token` olarak tutar. PDF / Word / Markdown sunucuda değil, tarayıcıda üretilir.
-
-| Adres | Ekran |
-|-------|--------|
-| `/login`, `/login/forgot`, `/reset-password` | Giriş ve şifre |
-| `/` | Dashboard (takvim, özet kartlar) |
-| `/meetings`, `/meetings/new`, `/meetings/[id]` | Liste, yükleme, transkript / analiz / Sor |
-| `/tasks` | Görev panosu ve öneriler |
-| `/people` | Kişiler |
-| `/settings` | Şifre değiştir |
+Next.js 16, FastAPI, PostgreSQL 14+, JWT, WhisperX (`large-v3`), ffmpeg, Gemini veya OpenAI, istemcide `jspdf` / `docx`.
 
 ---
 
 ## Kurulum
 
-Geliştirirken üç şey ayrı çalışır: PostgreSQL, FastAPI, Next.js.
+Gereksinimler: Python 3.12+, Node.js 20+, PostgreSQL 14+, ffmpeg, WhisperX (FastAPI sanal ortamına **kurulmaz**), Hugging Face hesabı + jeton (pyannote), Gemini veya OpenAI anahtarı. Transkripsiyon için NVIDIA GPU önerilir (`large-v3`).
 
-### Gereksinimler
+Anahtarlar ve şifreler **yalnızca** `backend/.env` içindedir; bu dosya git’e girmez. Şablon: `backend/.env.example`.
 
-- Python 3.12+
-- Node.js 20+ (npm)
-- PostgreSQL 14+
-- ffmpeg (`PATH` içinde veya `FFMPEG_BIN`)
-- WhisperX, FastAPI ortamından **ayrı** bir sanal ortamda (`whisperx` komutu). Uygulama sırasıyla `WHISPERX_BIN`, `PATH` ve masaüstündeki `whisperx-env` klasörüne bakar.
-- Hugging Face jetonu (konuşmacı ayırma / pyannote)
-- Gemini veya OpenAI API anahtarı (analiz ve Sor)
+### Veritabanı
 
-### 1. PostgreSQL
-
-Veritabanı adı, `backend/.env` içindeki `DATABASE_URL` ile aynı olsun.
+`backend/.env` içindeki `DATABASE_URL` ile aynı ad:
 
 ```sql
 CREATE DATABASE "ai-scribe";
 ```
 
-İlk şema:
+Boş şema (`DROP` içerir; mevcut veriyi siler):
 
 ```bash
 psql -U postgres -d ai-scribe -f backend/sql/schema.sql
 ```
 
-`schema.sql` tabloları silip yeniden oluşturur; dolu bir veritabanındaki veriyi yok eder. Daha sonra eklenen kolonlar uygulama açılışında `ensure_schema` ile gelir.
-
-### 2. Backend
-
-Windows (PowerShell):
+### Backend
 
 ```powershell
 cd backend
@@ -240,169 +171,132 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-macOS / Linux:
+macOS / Linux: `source .venv/bin/activate`, `cp .env.example .env`.
 
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
+`backend/.env` alanları:
 
-`.env` dosyasını doldur:
+| Değişken | Zorunlu | İşlev |
+|----------|---------|--------|
+| `DATABASE_URL` | evet | `postgresql+psycopg://postgres:SIFRE@localhost:5432/ai-scribe` |
+| `SECRET_KEY` | evet | JWT imzası; `change-me` bırakılmamalı |
+| `GEMINI_API_KEY` | analiz/soru için | Yoksa `OPENAI_API_KEY` |
+| `HF_TOKEN` | konuşmacı ayırma | Hugging Face access token (`read`). pyannote modellerinin lisansını HF’de kabul etmek gerekir (`pyannote/speaker-diarization-3.1` ve bağımlı segmentation). |
+| `WHISPERX_BIN` | PATH’te `whisperx` yoksa | `whisperx.exe` / binary tam yolu |
+| `FFMPEG_BIN` | PATH’te `ffmpeg` yoksa | ffmpeg tam yolu |
+| `WHISPERX_MODEL` | hayır | Varsayılan `large-v3` |
+| `GEMINI_MODEL` | hayır | Varsayılan `gemini-3.1-flash-lite` |
+| `OPENAI_MODEL` | hayır | Varsayılan `gpt-4o-mini` |
+| `FRONTEND_URL` / `CORS_ORIGINS` | hayır | Şifre sıfırlama linki ve CORS |
+| `UPLOAD_DIR` | hayır | Varsayılan `uploads` |
+| SMTP | hayır | Yoksa sıfırlama bağlantısı sunucu günlüğünde ve yanıtın `reset_url` alanında |
 
-| Değişken | Açıklama |
-|----------|----------|
-| `DATABASE_URL` | `postgresql+psycopg://KULLANICI:SIFRE@localhost:5432/ai-scribe` |
-| `SECRET_KEY` | JWT imzası; uzun, rastgele bir metin. `change-me` olarak bırakma |
-| `GEMINI_API_KEY` | Analiz ve Sor (yoksa `OPENAI_API_KEY`) |
-| `GEMINI_MODEL` | Varsayılan `gemini-3.1-flash-lite` |
-| `OPENAI_API_KEY` / `OPENAI_MODEL` | Gemini yoksa yedek (`gpt-4o-mini`) |
-| `HF_TOKEN` | WhisperX konuşmacı ayırma |
-| `FRONTEND_URL` | Şifre sıfırlama bağlantısı, varsayılan `http://localhost:3000` |
-| `CORS_ORIGINS` | JSON dizisi; varsayılan localhost:3000 |
-| `UPLOAD_DIR` | Varsayılan `uploads` (backend’in çalışma dizinine göre) |
-| `WHISPERX_MODEL` | Varsayılan `large-v3` |
-| `WHISPERX_BIN` | `whisperx.exe` / `whisperx` tam yolu (isteğe bağlı) |
-| `FFMPEG_BIN` | `ffmpeg` tam yolu (isteğe bağlı) |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_STARTTLS` | Şifre sıfırlama e-postası. SMTP yoksa bağlantı sunucu günlüğüne (ve yanıtta `reset_url` olarak) yazılır |
+Jetonlar: Gemini [Google AI Studio](https://aistudio.google.com/apikey); OpenAI [platform.openai.com](https://platform.openai.com/api-keys); HF [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+
+### WhisperX ve ffmpeg
+
+API venv’ine `pip install whisperx` **yapılmamalı**. Ayrı sanal ortam (ör. masaüstünde `whisperx-env`), GPU’lu PyTorch + `whisperx`. Windows örneği:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --reload --reload-dir app
+cd %USERPROFILE%\Desktop
+python -m venv whisperx-env
+.\whisperx-env\Scripts\activate
+pip install whisperx
 ```
 
-```bash
-python -m uvicorn app.main:app --port 8000 --reload --reload-dir app
-```
+Arama sırası: `WHISPERX_BIN` → `PATH` üzerindeki `whisperx` → `Desktop/whisperx-env` (OneDrive Desktop dahil). Bulunamazsa yükleme 201 döner ama durum `failed` olur.
 
-- API: http://localhost:8000
-- OpenAPI: http://localhost:8000/docs
-- ReDoc: http://localhost:8000/redoc
-- Sağlık kontrolü: http://localhost:8000/health
+ffmpeg PATH’te olmalı (video → ses, oynatma). Windows: `winget install Gyan.FFmpeg`.
 
-Komutu `backend/` klasöründen çalıştır. Aksi halde `uploads/` ve `.env` yanlış yerde aranır.
+Anahtar yokken: arayüz ve CRUD çalışır; diarization zayıf/yok (`HF_TOKEN`); özet/soru 502 (`GEMINI_API_KEY` / `OPENAI_API_KEY`).
 
-### 3. Frontend
+### Frontend
 
-```bash
+```powershell
 cd frontend
 npm install
-npm run dev
 ```
 
-Uygulama: http://localhost:3000
-
-İstersen `frontend/.env.local`:
+Gerekirse `frontend/.env.local`:
 
 ```
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-### WhisperX
+---
 
-WhisperX’i FastAPI sanal ortamına kurma; ayrı tut. `whisperx` komutu `PATH`’te veya `WHISPERX_BIN` ile görünür olsun. GPU / CUDA kurulumu modele göre değişir. Konuşmacı ayırmak için `HF_TOKEN` ve pyannote koşulları gerekir. Video yüklenince ffmpeg sesi ayırır.
+## Çalıştırma
 
-### Testler
+Üç süreç: PostgreSQL, API (`:8000`), istemci (`:3000`). Transkripsiyon veya analiz sürerken `backend/app` altında kayıt `--reload` nedeniyle işi keser.
 
-PostgreSQL açık olsun. Whisper ve analiz bu testlerde çalışmaz.
+**API** (çalışma dizini `backend`):
 
 ```powershell
 cd backend
-.\.venv\Scripts\pip.exe install -r requirements.txt
-.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --reload --reload-dir app
 ```
 
-```bash
-cd backend
-pip install -r requirements.txt
-python -m pytest
+`GET http://localhost:8000/health` → `{ "status": "ok", "database": "connected" }`.
+
+**İstemci:**
+
+```powershell
+cd frontend
+npm run dev
 ```
+
+Tarayıcı: `http://localhost:3000`.
+
+Unix: `source .venv/bin/activate` sonra aynı `uvicorn` komutu.
+
+OpenAPI: `http://localhost:8000/docs` — ReDoc: `/redoc`.
 
 ---
 
-## API
+## HTTP API
 
-Tüm asıl uç noktalar **`/api/v1`** altındadır. Kökte ayrıca `GET /health` vardır.
-
-Güncel şema http://localhost:8000/docs adresindedir. Aşağıdaki özet, koddaki yönlendiricilerle uyumludur.
-
-### Kimlik doğrulama
-
-Kayıt, giriş ve şifre sıfırlama dışında istekler `Authorization: Bearer <access_token>` ister. Jeton 7 gün geçerlidir. JWT **adres satırındaki sorgu parametresine konmaz**.
-
-Hata gövdesi genelde `{ "detail": "…" }` şeklindedir (metin veya doğrulama listesi).
-
-```http
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-```
+Taban: `/api/v1`. Hata gövdesi `{ "detail": "…" }`. Sözleşmenin kaynağı OpenAPI’dir.
 
 ### Sağlık
 
-| Metod | Yol | Giriş | Açıklama |
-|-------|-----|-------|----------|
-| GET | `/health` | — | Veritabanına ping; 503 = bağlantı yok |
-| GET | `/api/v1/health` | — | Aynı |
+| Metod | Yol | Açıklama |
+|-------|-----|----------|
+| GET | `/health` | Veritabanı ping; kapalıysa 503 |
+| GET | `/api/v1/health` | Aynı |
 
-Yanıt: `{ "status": "ok", "database": "connected" }`
+### Kimlik — `/api/v1/auth`
 
-### Auth — `/api/v1/auth`
+| Metod | Yol | Auth | Gövde | Sonuç |
+|-------|-----|------|-------|--------|
+| POST | `/register` | — | `{ email, password }` (min. 6) | 201 token |
+| POST | `/login` | — | `{ email, password }` | 200 token |
+| GET | `/me` | evet | — | kullanıcı |
+| POST | `/change-password` | evet | `{ current_password, new_password }` | kullanıcı |
+| POST | `/forgot-password` | — | `{ email }` | Aynı mesaj; SMTP yoksa `reset_url` |
+| POST | `/reset-password` | — | `{ token, password }` | token |
 
-| Metod | Yol | Giriş | Gövde | Başarı |
-|-------|-----|-------|-------|--------|
-| POST | `/register` | — | `{ "email", "password" }` (şifre en az 6 karakter) | 201 `TokenResponse` |
-| POST | `/login` | — | `{ "email", "password" }` | 200 `TokenResponse` |
-| GET | `/me` | evet | — | `UserOut` |
-| POST | `/change-password` | evet | `{ "current_password", "new_password" }` | `UserOut` |
-| POST | `/forgot-password` | — | `{ "email" }` | `{ "message", "reset_url"? }` (e-posta kayıtlı olmasa da aynı mesaj) |
-| POST | `/reset-password` | — | `{ "token", "password" }` | `TokenResponse` |
-
-`TokenResponse`: `{ "access_token", "token_type": "bearer", "user": { "user_id", "name", "email" } }`
-
-E-posta zaten varsa 409. Yanlış e-posta veya şifre 401.
+Token: `{ access_token, token_type: "bearer", user }`. Çift e-posta 409. Hatalı giriş 401 (tek mesaj).
 
 ### Toplantılar — `/api/v1/meetings`
 
-| Metod | Yol | Gövde | Açıklama |
-|-------|-----|-------|----------|
-| GET | `/` | — | Senin toplantıların (`MeetingListOut`) |
-| POST | `/` | **multipart** | Yeni toplantı ve dosya; transkript kuyruğa alınır. 201 `MeetingOut` |
-| GET | `/{id}` | — | Detay: transkript, özet, karar, aksiyon, kişiler, ilerleme. Durum `uploaded` ve çalışan iş yoksa transkript yeniden başlar |
-| PATCH | `/{id}` | JSON `MeetingUpdate` | Başlık vb. ve aşağıdaki iç alanlar |
-| DELETE | `/{id}` | — | 204; kayıt dosyası da silinir |
-| GET | `/{id}/audio` | — | Kaydı oynatmak için dosya (`FileResponse`) |
-| POST | `/{id}/analyze` | — | Analizi başlatır veya yeniler. Transkript yoksa 409 |
-| POST | `/{id}/ask` | `{ "question" }` (1–2000 karakter) | Transkripte soru. `{ "answer", "cites": [{ seq, timestamp, speaker, text }] }` |
-| PATCH | `/{id}/speakers` | `SpeakerRenameIn` | Konuşmacı: tek satır, tüm etiket veya tahmin onayı / reddi |
-| PATCH | `/{id}/transcript` | `{ "seq", "text", "flags"? }` | Satır metni |
+| Metod | Yol | Açıklama |
+|-------|-----|----------|
+| GET | `/` | Kullanıcının toplantıları |
+| POST | `/` | `multipart/form-data`; transkripsiyon kuyruğa. 201 |
+| GET | `/{id}` | Detay ve ilerleme. `uploaded` ve iş yoksa transkripsiyon yeniden planlanır |
+| PATCH | `/{id}` | Meta ve gömülü güncellemeler; yanıt `MeetingOut` (detay için GET) |
+| DELETE | `/{id}` | 204; medya silinir |
+| GET | `/{id}/audio` | Oynatma (inline) |
+| POST | `/{id}/analyze` | Analiz kuyruğu. Transkript yoksa 409 |
+| POST | `/{id}/ask` | `{ question }` (1–2000) → `{ answer, cites }` |
+| PATCH | `/{id}/speakers` | Satır / toplu etiket / tahmin onay-red |
+| PATCH | `/{id}/transcript` | `{ seq, text, flags? }` |
+| POST | `/{id}/transcript/merge` | `{ seq }`: sonraki satırı bu satıra ekler, alt satırı siler |
 
-**POST /** form alanları:
+`POST` form: `title`, `date` (gelecek an +1 dk’dan ileri 422), `audio` (mp3/wav/m4a/mp4/webm/mov; boş veya >500 MB → 400); isteğe `attendees`, `description`, `language` (`tr` \| `en`).
 
-| Alan | Zorunlu | Not |
-|------|---------|-----|
-| `title` | evet | 1–255 karakter |
-| `date` | evet | ISO tarih-saat; gelecekte olamaz |
-| `audio` | evet | mp3, wav, m4a, mp4, webm, mov; boş dosya 400; 500 MB üstü 400 |
-| `attendees` | — | Virgülle isimler (`named_attendees`) |
-| `description` | — | |
-| `language` | — | `tr` (varsayılan) veya `en` |
+`PATCH /{id}` alanları: `title`, `date`, `description`, `named_attendees` / `attendees` (transkript varsa eşleme yeniden), `summary`, `update_transcript`, `update_action`, `update_decision`, `dismiss_action`, `analyze: true`.
 
-**PATCH /{id}** — gönderdiğin alanlar uygulanır:
-
-| Alan | Ne yapar |
-|------|----------|
-| `title`, `date`, `description` | Toplantı bilgileri |
-| `named_attendees` veya `attendees` | Yazılan katılımcılar; transkript varsa konuşmacı eşlemesi yeniden çalışır |
-| `summary` | Özet metni |
-| `update_transcript` | `{ seq, text, flags }` |
-| `update_action` | `{ seq, description?, assignee?, assignee_id?, speaker_label?, due_date?, notes? }` |
-| `update_decision` | `{ seq, text }` |
-| `dismiss_action` | Aksiyon önerisini siler (`seq`) |
-| `analyze` | `true` ise analizi kuyruğa alır (transkript şart) |
-
-Bu PATCH kısa kayıt (`MeetingOut`) döner. Tam detay için ardından `GET /{id}` çağır.
-
-**PATCH /{id}/speakers** örnekleri:
+Konuşmacı gövdesi:
 
 ```json
 { "from_speaker": "Konuşmacı F", "speaker": "Mehmet" }
@@ -416,91 +310,77 @@ Bu PATCH kısa kayıt (`MeetingOut`) döner. Tam detay için ardından `GET /{id
 { "from_speaker": "Ali ?", "action": "confirm" }
 ```
 
-`action`: `confirm` veya `reject`. Aynı toplantıda bu isimde başka konuşmacı varsa 409. Bu uç, **Kişiler listesindeki adı değiştirmez**.
-
-**MeetingOut:** `meeting_id`, `title`, `date`, `status`, `duration`, `attendees`, `named_attendees`, `description`, `language`, `audio_path`.
-
-**MeetingDetailOut:** bunların üzerine `transcript[]`, `summary`, `decisions[]`, `actions[]`, `people[]`, isteğe bağlı `transcription` (`progress`, `message`, `error`, `elapsed_seconds`).
+`action`: `confirm` \| `reject`. Aynı toplantıda çakışan kişi adı 409. Bu uç `people.name` güncellemez.
 
 ### Kişiler — `/api/v1/people`
 
-Aynı hesapta aynı isim ikinci kez kullanılamaz (Türkçe büyük/küçük harf farkı yok sayılır). 409: `"Bu isimde biri zaten var"` veya o toplantıda başka konuşmacının adı çakışıyorsa.
+Aynı hesapta aynı görünen ad yok (İ/i eşlenir) → 409.
 
 | Metod | Yol | Açıklama |
 |-------|-----|----------|
-| GET | `/` | Kişi listesi. `?meeting_id=` ile o toplantıya bağlı olanlar |
-| POST | `/` | `{ "name", "note?" }` → 201 |
-| PATCH | `/{person_id}` | Ad ve/veya not. **Ad değişince** bağlı görev ve aksiyon yazıları ile o kişinin toplantılarındaki transkript etiketleri güncellenir |
+| GET | `/` | Liste; `?meeting_id=` süzgeci |
+| POST | `/` | `{ name, note? }` → 201 |
+| PATCH | `/{person_id}` | Ad değişince görev, aksiyon, transkript etiketleri |
 | DELETE | `/{person_id}` | 204 |
-
-`PersonOut`: `person_id`, `name`, `note`, `label`, `attendee`, `meetings[]`.
 
 ### Görevler — `/api/v1/tasks`
 
-Teslim tarihi zorunludur; geçmiş bir gün 422 verir. Durum: `in_progress` veya `done`.
+Kimlik `(meeting_id, action_seq)`. Teslim tarihi zorunlu; geçmiş gün 422. Durum: `in_progress` \| `done`.
 
 | Metod | Yol | Açıklama |
 |-------|-----|----------|
-| GET | `/` | `{ items, suggestions, people }` — görevler, henüz göreve çevrilmemiş aksiyonlar, kişi listesi |
-| POST | `/` | Yeni görev. `action_seq` varsa o aksiyondan; yoksa toplantıya yeni aksiyon ve görev. 201. Aynı aksiyon ikinci kez görev olursa 409 |
-| PATCH | `/{meeting_id}/{action_seq}` | Başlık, durum, sorumlu, tarih, açıklama |
-| DELETE | `/{meeting_id}/{action_seq}` | 204 |
-
-**POST gövdesi (`TaskCreate`):**
+| GET | `/` | Görevler, göreve çevrilmemiş aksiyonlar, kişiler |
+| POST | `/` | `action_seq` varsa o aksiyondan; tekrar 409 |
+| PATCH | `/{meeting_id}/{action_seq}` | Başlık, durum, sorumlu, tarih |
+| DELETE | `/{meeting_id}/{action_seq}` | 204; aksiyon kalır |
 
 ```json
 {
   "meeting_id": 41,
   "title": "Teklifi gönder",
   "due_date": "2026-09-10",
-  "description": "",
   "assignee": "Hasan",
-  "assignee_id": null,
-  "speaker_label": "Konuşmacı F",
   "action_seq": 3
 }
 ```
 
-`speaker_label`, konuşmacıyı kişiye bağlar ve transkript etiketini kişi adına çevirir. Kişi bir kez oluştuktan sonra transkriptte isim değiştirmek kişi kaydının adını değiştirmez.
+`speaker_label` konuşmacıyı kişi kaydına bağlar.
 
----
-
-## Örnek istekler
+### Örnek
 
 ```bash
-# Kayıt
 curl -s -X POST http://localhost:8000/api/v1/auth/register \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"sen@ornek.com\",\"password\":\"gizli12\"}"
+  -d "{\"email\":\"ornek@example.com\",\"password\":\"gizli12\"}"
 
-# Liste (jetonu giriş yanıtından al)
 curl -s http://localhost:8000/api/v1/meetings \
   -H "Authorization: Bearer ACCESS_TOKEN"
 
-# Analiz
 curl -s -X POST http://localhost:8000/api/v1/meetings/41/analyze \
   -H "Authorization: Bearer ACCESS_TOKEN"
 ```
 
 ---
 
-## Depo
+## Test
+
+PostgreSQL açık olmalıdır. WhisperX ve LLM bu süitte çağrılmaz.
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pytest
+```
+
+---
+
+## Depo düzeni
 
 ```text
 ai-scribe/
-├── backend/
-│   ├── app/                 FastAPI uygulaması
-│   ├── tests/               pytest (API + birim)
-│   ├── sql/schema.sql       İlk PostgreSQL şeması
-│   ├── uploads/             Kayıt dosyaları (git’te yok)
-│   ├── requirements.txt
-│   └── .env.example
-├── frontend/
-│   └── src/app/             Next.js sayfaları
-├── docs/week1/              İlk tasarım notları; güncel bilgi bu README’de
+├── backend/       FastAPI, tests/, sql/schema.sql, uploads/, .env.example
+├── frontend/      Next.js
+├── docs/week1/    Erken tasarım notları; güncel sözleşme bu dosyadır
 └── README.md
 ```
 
-Git’e girmez: `backend/.env`, `backend/uploads/*`, `downloads/`, `frontend/.next/`, sanal ortamlar.
-
-Bu repoda Docker / Compose yok; yerelde üç süreci ayrı çalıştırırsın.
+Sürüm kontrolüne girmez: `backend/.env`, `uploads/`, `downloads/`, `frontend/.next/`, sanal ortamlar.

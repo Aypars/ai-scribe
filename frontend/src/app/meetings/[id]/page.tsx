@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { AppShell } from "@/components/AppShell";
 import { AttendeeListEditor, joinAttendeeList, parseAttendeeList } from "@/components/AttendeeListEditor";
@@ -23,6 +23,7 @@ import {
   updateMeetingAction,
   updateMeetingDecision,
   updateMeetingSummary,
+  mergeTranscriptLines,
   updateTranscriptLine,
   type ActionItem,
   type Decision,
@@ -1231,6 +1232,31 @@ export default function MeetingDetailPage() {
     }
   }
 
+  async function handleMergeLine(seq: number) {
+    if (!meeting) return;
+    setTextBusy(true);
+    setError(null);
+    try {
+      const updated = await mergeTranscriptLines(meeting.meeting_id, seq);
+      setMeeting({
+        ...meeting,
+        transcript: updated.transcript,
+        decisions: updated.decisions,
+      });
+      setTextEdit(null);
+      setLineEdit(null);
+      setFlagOpen(null);
+      if (focusSeq != null && updated.transcript.every((line) => line.seq !== focusSeq)) {
+        setFocusSeq(seq);
+      }
+      toast("Satırlar birleştirildi");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Satırlar birleştirilemedi");
+    } finally {
+      setTextBusy(false);
+    }
+  }
+
   async function handleFlagApply(line: TranscriptLine, index: number) {
     if (!meeting) return;
     const flag = line.flags?.[index];
@@ -1882,8 +1908,16 @@ export default function MeetingDetailPage() {
                     }}
                     className="relative max-h-[calc(100dvh-18rem)] overflow-y-auto overscroll-contain rounded-xl border border-slate-200 dark:border-teal-800/50"
                   >
-                  <ul className="divide-y divide-slate-100 px-2 dark:divide-teal-900/40">
-                    {visibleLines.map((line) => {
+                  <ul className="px-2">
+                    {visibleLines.map((line, index) => {
+                      const nextVisible = visibleLines[index + 1];
+                      const storedIndex = meeting.transcript.findIndex((item) => item.seq === line.seq);
+                      const storedNext = storedIndex >= 0 ? meeting.transcript[storedIndex + 1] : undefined;
+                      const canMerge =
+                        usingOriginalLines &&
+                        nextVisible != null &&
+                        storedNext != null &&
+                        nextVisible.seq === storedNext.seq;
                       const speaker = line.speaker;
                       const speakerNode = speaker ? (
                         <span onClick={(event) => event.stopPropagation()}>
@@ -1914,8 +1948,8 @@ export default function MeetingDetailPage() {
                       const active = !focused && activeSeq === line.seq;
                       const editingText = textEdit?.seq === line.seq;
                       return (
+                        <Fragment key={line.seq}>
                         <li
-                          key={line.seq}
                           data-seq={line.seq}
                           ref={(el) => {
                             if (focused) focusRef.current = el;
@@ -2029,6 +2063,27 @@ export default function MeetingDetailPage() {
                           </div>
                           )}
                         </li>
+                        {canMerge ? (
+                          <li className="relative z-10 flex h-4 items-center">
+                            <div className="h-px min-w-0 flex-1 bg-slate-100 dark:bg-teal-900/40" />
+                            <button
+                              type="button"
+                              title="Alt satırı bu satıra ekle"
+                              disabled={textBusy}
+                              onClick={() => void handleMergeLine(line.seq)}
+                              className="mx-1 inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 shadow-sm transition hover:border-teal-500 hover:bg-teal-50 hover:text-teal-700 disabled:cursor-wait disabled:opacity-50 dark:border-teal-800 dark:bg-[#0c1c1b] dark:text-teal-600 dark:hover:border-teal-500 dark:hover:bg-teal-900/50 dark:hover:text-teal-200"
+                            >
+                              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+                              </svg>
+                              <span className="sr-only">Alt satırı bu satıra ekle</span>
+                            </button>
+                            <div className="h-px min-w-0 flex-1 bg-slate-100 dark:bg-teal-900/40" />
+                          </li>
+                        ) : index < visibleLines.length - 1 ? (
+                          <li aria-hidden className="h-px bg-slate-100 dark:bg-teal-900/40" />
+                        ) : null}
+                        </Fragment>
                       );
                     })}
                   </ul>

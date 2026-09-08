@@ -282,6 +282,16 @@ export async function updateTranscriptLine(
   return fetchMeeting(id);
 }
 
+export async function mergeTranscriptLines(id: number, seq: number): Promise<MeetingDetail> {
+  const response = await fetch(`${API_URL}/api/v1/meetings/${id}/transcript/merge`, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ seq }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
 export async function updateMeetingSummary(id: number, summary: string): Promise<MeetingDetail> {
   const response = await fetch(`${API_URL}/api/v1/meetings/${id}`, {
     method: "PATCH",

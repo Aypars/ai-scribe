@@ -455,6 +455,16 @@ def resolve_speaker_guess(db: Session, meeting: Meeting, pending_name: str, *, c
     return meeting
 
 
+def join_line_texts(upper: str, lower: str) -> str:
+    left = (upper or "").strip()
+    right = (lower or "").strip()
+    if not right:
+        return left
+    if not left:
+        return right
+    return f"{left} {right}"
+
+
 def update_transcript_text(
     db: Session,
     meeting: Meeting,
@@ -471,6 +481,29 @@ def update_transcript_text(
     else:
         kept = [item for item in parse_flags(row.flags) if item["original"] in text]
         row.flags = dump_flags(kept)
+    db.commit()
+    return get_for_user(db, meeting.user_id, meeting.meeting_id) or meeting
+
+
+def merge_transcript_with_next(db: Session, meeting: Meeting, seq: int) -> Meeting | None:
+    rows = sorted(meeting.transcripts, key=lambda row: row.seq)
+    index = next((i for i, row in enumerate(rows) if row.seq == seq), None)
+    if index is None or index + 1 >= len(rows):
+        return None
+    upper = rows[index]
+    lower = rows[index + 1]
+    merged = join_line_texts(upper.text, lower.text)
+    if not merged:
+        return None
+    flags = [item for item in parse_flags(upper.flags) + parse_flags(lower.flags) if item["original"] in merged]
+    upper.text = merged
+    upper.flags = dump_flags(flags)
+    for decision in db.scalars(select(Decision).where(Decision.meeting_id == meeting.meeting_id)).all():
+        if decision.source_seq == lower.seq:
+            decision.source_seq = upper.seq
+        if decision.source_end_seq == lower.seq:
+            decision.source_end_seq = upper.seq
+    db.delete(lower)
     db.commit()
     return get_for_user(db, meeting.user_id, meeting.meeting_id) or meeting
 

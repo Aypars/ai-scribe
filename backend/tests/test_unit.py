@@ -190,3 +190,13 @@ def test_spread_long_lines_assigns_later_timestamps():
     assert out[0].timestamp == 50
     assert out[1].timestamp > 50
     assert out[-1].timestamp == 80
+
+
+def test_join_line_texts():
+    from app.repositories.meetings import join_line_texts
+
+    assert join_line_texts("Merhaba", "nasılsın") == "Merhaba nasılsın"
+    assert join_line_texts("  Bir  ", "  iki ") == "Bir iki"
+    assert join_line_texts("Sadece üst", "") == "Sadece üst"
+    assert join_line_texts("", "Sadece alt") == "Sadece alt"
+    assert join_line_texts("   ", "   ") == ""

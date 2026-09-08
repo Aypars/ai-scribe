@@ -92,6 +92,10 @@ class TranscriptEditIn(BaseModel):
     flags: list[TranscriptFlagOut] | None = None
 
 
+class TranscriptMergeIn(BaseModel):
+    seq: int
+
+
 class DecisionPatchIn(BaseModel):
     seq: int
     text: str = Field(..., min_length=1, max_length=4000)
