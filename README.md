@@ -379,6 +379,5 @@ cd backend
 ai-scribe/
 ├── backend/       FastAPI, tests/, sql/schema.sql, uploads/, .env.example
 ├── frontend/      Next.js
-├── docs/week1/    Tasarım notları
 └── README.md
 ```
