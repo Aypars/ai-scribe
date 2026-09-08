@@ -2,7 +2,7 @@
 
 Toplantı ses ve video kayıtlarından konuşmacı ayrımlı transkript üreten, kullanıcı onayıyla özet / karar / aksiyon çıkaran ve aksiyonları görev olarak takip eden yerel asistan.
 
-İstemci (`frontend/`, Next.js), REST API (`backend/`, FastAPI) ve PostgreSQL birbirinden bağımsız süreçlerdir. Konteyner orkestrasyonu yoktur.
+İstemci (`frontend/`, Next.js), REST API (`backend/`, FastAPI) ve PostgreSQL ayrı süreçler olarak çalışır.
 
 ---
 
@@ -25,11 +25,11 @@ Konuşmacı etiketini değiştirmek `people` kaydının adını değiştirmez. `
 
 ## Mimari
 
-İstemci `http://localhost:3000` üzerinden JSON ve JWT ile `http://localhost:8000/api/v1` konuşur. API kayıt meta verisini PostgreSQL’e, medyayı `backend/uploads/{user_id}/` altına yazar (üst sınır 500 MB). Transkripsiyon yerel WhisperX + ffmpeg; analiz ve soru-cevap Gemini (yoksa OpenAI). CORS: `localhost:3000`, `127.0.0.1:3000` (ve 3001).
+İstemci `http://localhost:3000` üzerinden JSON ve JWT ile `http://localhost:8000/api/v1` konuşur. API meta veriyi PostgreSQL’e, medyayı `backend/uploads/{user_id}/` altına yazar (en fazla 500 MB). Yazıya çevirme yerel WhisperX ve ffmpeg ile; özet, karar, aksiyon ve soru Gemini (yoksa OpenAI) ile yapılır. CORS: `http://localhost:3000` ve `http://127.0.0.1:3000`.
 
-Toplantı durumu: `uploaded` → `transcribed` → `analyzed`. Transkripsiyon hatası `failed`. WhisperX etiketi `people` satırı oluşturmaz; kişi görev atamasında veya Kişiler ekranından doğar.
+Toplantı durumu: `uploaded` → `transcribed` → `analyzed`. Transkripsiyon hatası `failed`. Konuşmacı etiketi kişi kaydı oluşturmaz; kişi, Kişiler ekranından veya görev atamasından doğar.
 
-Kimlik: HS256 JWT, `sub` = `user_id`, süre 7 gün, istemcide `localStorage.access_token`. Kayıt, giriş ve şifre sıfırlama dışında tüm uçlar `Authorization: Bearer`. Başka kullanıcının kaydı 404 döner.
+Kimlik: HS256 JWT (`sub` = `user_id`, 7 gün). Kayıt, giriş ve şifre sıfırlama dışındaki uçlar `Authorization: Bearer` ister. Kayıtlar kullanıcıya aittir.
 
 ```mermaid
 flowchart LR
@@ -81,7 +81,7 @@ sequenceDiagram
   API->>DB: status = analyzed
 ```
 
-Uzun işler HTTP’yi bloklamaz. İstemci `GET /api/v1/meetings/{id}` ile `status` ve `transcription` alanını yoklar.
+Uzun işler HTTP yanıtını bekletmez. İstemci `GET /api/v1/meetings/{id}` ile `status` ve `transcription` alanını izler.
 
 ### Backend katmanları (`backend/app`)
 
@@ -100,23 +100,23 @@ Uzun işler HTTP’yi bloklamaz. İstemci `GET /api/v1/meetings/{id}` ile `statu
 
 ## Veri modeli
 
-Şema: `backend/sql/schema.sql`. Açılışta `ensure_schema` eksik kolonları ekler.
+Şema dosyası: `backend/sql/schema.sql`.
 
-Güçlü varlıklar: `users`, `meetings`, `people`. Zayıf (tanımlayıcı) varlıklar bileşik birincil anahtar kullanır: `transcripts (meeting_id, seq)`, `decisions` / `actions (meeting_id, seq)`, `tasks (meeting_id, action_seq)`. `analyses` toplantı ile 1:1 (`PK = meeting_id`).
+Güçlü varlıklar: `users`, `meetings`, `people`. Zayıf varlıkların birincil anahtarı sahibiyle tanımlıdır: `transcripts (meeting_id, seq)`, `decisions` / `actions (meeting_id, seq)`, `tasks (meeting_id, action_seq)`. `analyses` toplantı ile 1:1 (`PK = meeting_id`).
 
-Çoğu FK `ON DELETE CASCADE`. `actions.assignee_id` ve `tasks.assignee_id` → `people` için `ON DELETE SET NULL`. `decisions.source_seq` transkript satırına FK değildir (düzenleme / birleştirme).
+Çoğu yabancı anahtar `ON DELETE CASCADE`. `actions.assignee_id` ve `tasks.assignee_id` kişi silinince `SET NULL` olur. `decisions.source_seq` transkript satırına yabancı anahtar değildir.
 
 | Tablo | Rol |
 |-------|-----|
 | `users` | Hesap; şifre bcrypt; sıfırlama jetonu hash’li |
 | `meetings` | Başlık, tarih, dil, `audio_path`, `status` |
 | `transcripts` | Satır metni, saniye, konuşmacı, `flags` (JSON metin) |
-| `people` | Hesaba özel dizin (login değildir) |
-| `meeting_people` | N:N + `speaker_label` |
+| `people` | Hesaba özel kişi dizini |
+| `meeting_people` | Toplantı–kişi ilişkisi ve `speaker_label` |
 | `analyses` | Özet |
-| `decisions` | Karar metni + transkript aralığı |
-| `actions` | Analiz önerisi; `dismissed` korunur |
-| `tasks` | Aksiyon ile 1:1; `in_progress` / `done` |
+| `decisions` | Karar metni ve transkript aralığı |
+| `actions` | Analiz önerisi |
+| `tasks` | Aksiyonla 1:1 görev; `in_progress` / `done` |
 
 ```mermaid
 erDiagram
@@ -143,9 +143,9 @@ Next.js 16, FastAPI, PostgreSQL 14+, JWT, WhisperX (`large-v3`), ffmpeg, Gemini 
 
 ## Kurulum
 
-Gereksinimler: Python 3.12+, Node.js 20+, PostgreSQL 14+, ffmpeg, WhisperX (FastAPI sanal ortamına **kurulmaz**), Hugging Face hesabı + jeton (pyannote), Gemini veya OpenAI anahtarı. Transkripsiyon için NVIDIA GPU önerilir (`large-v3`).
+Gerekli yazılımlar: Python 3.12+, Node.js 20+, PostgreSQL 14+, ffmpeg. WhisperX, FastAPI sanal ortamından ayrı kurulur. Konuşmacı ayırmak için Hugging Face jetonu ve pyannote modeli; özet ve soru için Gemini veya OpenAI anahtarı. `large-v3` ile yazıya çevirmede NVIDIA GPU önerilir.
 
-Anahtarlar ve şifreler **yalnızca** `backend/.env` içindedir; bu dosya git’e girmez. Şablon: `backend/.env.example`.
+Yapılandırma `backend/.env.example` dosyasından kopyalanır; değerler aşağıdaki tablodadır.
 
 ### Veritabanı
 
@@ -173,28 +173,28 @@ copy .env.example .env
 
 macOS / Linux: `source .venv/bin/activate`, `cp .env.example .env`.
 
-`backend/.env` alanları:
+Oluşan `backend/.env` içinde doldurulacak alanlar:
 
-| Değişken | Zorunlu | İşlev |
-|----------|---------|--------|
-| `DATABASE_URL` | evet | `postgresql+psycopg://postgres:SIFRE@localhost:5432/ai-scribe` |
-| `SECRET_KEY` | evet | JWT imzası; `change-me` bırakılmamalı |
-| `GEMINI_API_KEY` | analiz/soru için | Yoksa `OPENAI_API_KEY` |
-| `HF_TOKEN` | konuşmacı ayırma | Hugging Face access token (`read`). pyannote modellerinin lisansını HF’de kabul etmek gerekir (`pyannote/speaker-diarization-3.1` ve bağımlı segmentation). |
-| `WHISPERX_BIN` | PATH’te `whisperx` yoksa | `whisperx.exe` / binary tam yolu |
-| `FFMPEG_BIN` | PATH’te `ffmpeg` yoksa | ffmpeg tam yolu |
-| `WHISPERX_MODEL` | hayır | Varsayılan `large-v3` |
-| `GEMINI_MODEL` | hayır | Varsayılan `gemini-3.1-flash-lite` |
-| `OPENAI_MODEL` | hayır | Varsayılan `gpt-4o-mini` |
-| `FRONTEND_URL` / `CORS_ORIGINS` | hayır | Şifre sıfırlama linki ve CORS |
-| `UPLOAD_DIR` | hayır | Varsayılan `uploads` |
-| SMTP | hayır | Yoksa sıfırlama bağlantısı sunucu günlüğünde ve yanıtın `reset_url` alanında |
+| Değişken | Ne zaman | Açıklama |
+|----------|----------|----------|
+| `DATABASE_URL` | her zaman | `postgresql+psycopg://postgres:SIFRE@localhost:5432/ai-scribe` |
+| `SECRET_KEY` | her zaman | JWT imzası; örnekteki `change-me` değeri değiştirilmeli |
+| `GEMINI_API_KEY` | özet, karar, soru | Yoksa `OPENAI_API_KEY` kullanılır |
+| `HF_TOKEN` | konuşmacı ayırma | Hugging Face `read` jetonu. Hugging Face’te pyannote lisansları kabul edilmeli (`pyannote/speaker-diarization-3.1` ve bağlı segmentation modeli). |
+| `WHISPERX_BIN` | `whisperx` PATH’te değilse | Binary’nin tam yolu |
+| `FFMPEG_BIN` | `ffmpeg` PATH’te değilse | ffmpeg’in tam yolu |
+| `WHISPERX_MODEL` | isteğe bağlı | Varsayılan `large-v3` |
+| `GEMINI_MODEL` | isteğe bağlı | Varsayılan `gemini-3.1-flash-lite` |
+| `OPENAI_MODEL` | isteğe bağlı | Varsayılan `gpt-4o-mini` |
+| `FRONTEND_URL`, `CORS_ORIGINS` | isteğe bağlı | Şifre sıfırlama bağlantısının kök adresi ve CORS |
+| `UPLOAD_DIR` | isteğe bağlı | Varsayılan `uploads` |
+| SMTP | isteğe bağlı | Tanımlı değilse sıfırlama bağlantısı sunucu günlüğüne ve yanıtın `reset_url` alanına yazılır |
 
-Jetonlar: Gemini [Google AI Studio](https://aistudio.google.com/apikey); OpenAI [platform.openai.com](https://platform.openai.com/api-keys); HF [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+Anahtar adresleri: Gemini [Google AI Studio](https://aistudio.google.com/apikey), OpenAI [platform.openai.com](https://platform.openai.com/api-keys), Hugging Face [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 
 ### WhisperX ve ffmpeg
 
-API venv’ine `pip install whisperx` **yapılmamalı**. Ayrı sanal ortam (ör. masaüstünde `whisperx-env`), GPU’lu PyTorch + `whisperx`. Windows örneği:
+WhisperX, API’nin `.venv` ortamına kurulmaz. Ayrı bir sanal ortam kullanılır (örneğin masaüstünde `whisperx-env`), içinde GPU’lu PyTorch ve `whisperx` bulunur. Windows:
 
 ```powershell
 cd %USERPROFILE%\Desktop
@@ -203,11 +203,11 @@ python -m venv whisperx-env
 pip install whisperx
 ```
 
-Arama sırası: `WHISPERX_BIN` → `PATH` üzerindeki `whisperx` → `Desktop/whisperx-env` (OneDrive Desktop dahil). Bulunamazsa yükleme 201 döner ama durum `failed` olur.
+Uygulama `whisperx` komutunu `WHISPERX_BIN`, sistem `PATH` ve `Desktop/whisperx-env` altında arar. Bulamazsa toplantı kaydı oluşur, durum `failed` olur.
 
-ffmpeg PATH’te olmalı (video → ses, oynatma). Windows: `winget install Gyan.FFmpeg`.
+ffmpeg PATH’te olmalıdır (videodan ses ayırma ve oynatma). Windows: `winget install Gyan.FFmpeg`.
 
-Anahtar yokken: arayüz ve CRUD çalışır; diarization zayıf/yok (`HF_TOKEN`); özet/soru 502 (`GEMINI_API_KEY` / `OPENAI_API_KEY`).
+Konuşmacı ayırma `HF_TOKEN` ister. Özet ve soru Gemini veya OpenAI anahtarı ister.
 
 ### Frontend
 
@@ -226,7 +226,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 
 ## Çalıştırma
 
-Üç süreç: PostgreSQL, API (`:8000`), istemci (`:3000`). Transkripsiyon veya analiz sürerken `backend/app` altında kayıt `--reload` nedeniyle işi keser.
+PostgreSQL, API (`:8000`) ve istemci (`:3000`) aynı anda çalışır.
 
 **API** (çalışma dizini `backend`):
 
@@ -254,7 +254,7 @@ OpenAPI: `http://localhost:8000/docs` — ReDoc: `/redoc`.
 
 ## HTTP API
 
-Taban: `/api/v1`. Hata gövdesi `{ "detail": "…" }`. Sözleşmenin kaynağı OpenAPI’dir.
+Taban: `/api/v1`. Hata gövdesi `{ "detail": "…" }`. Açık şema: `http://localhost:8000/docs`.
 
 ### Sağlık
 
@@ -274,7 +274,7 @@ Taban: `/api/v1`. Hata gövdesi `{ "detail": "…" }`. Sözleşmenin kaynağı O
 | POST | `/forgot-password` | — | `{ email }` | Aynı mesaj; SMTP yoksa `reset_url` |
 | POST | `/reset-password` | — | `{ token, password }` | token |
 
-Token: `{ access_token, token_type: "bearer", user }`. Çift e-posta 409. Hatalı giriş 401 (tek mesaj).
+Token: `{ access_token, token_type: "bearer", user }`. Çift e-posta 409. Hatalı giriş 401.
 
 ### Toplantılar — `/api/v1/meetings`
 
@@ -282,8 +282,8 @@ Token: `{ access_token, token_type: "bearer", user }`. Çift e-posta 409. Hatal�
 |-------|-----|----------|
 | GET | `/` | Kullanıcının toplantıları |
 | POST | `/` | `multipart/form-data`; transkripsiyon kuyruğa. 201 |
-| GET | `/{id}` | Detay ve ilerleme. `uploaded` ve iş yoksa transkripsiyon yeniden planlanır |
-| PATCH | `/{id}` | Meta ve gömülü güncellemeler; yanıt `MeetingOut` (detay için GET) |
+| GET | `/{id}` | Toplantı detayı ve transkripsiyon ilerlemesi |
+| PATCH | `/{id}` | Başlık, tarih, özet, aksiyon, karar ve transkript güncellemeleri |
 | DELETE | `/{id}` | 204; medya silinir |
 | GET | `/{id}/audio` | Oynatma (inline) |
 | POST | `/{id}/analyze` | Analiz kuyruğu. Transkript yoksa 409 |
@@ -364,7 +364,7 @@ curl -s -X POST http://localhost:8000/api/v1/meetings/41/analyze \
 
 ## Test
 
-PostgreSQL açık olmalıdır. WhisperX ve LLM bu süitte çağrılmaz.
+PostgreSQL açık olmalıdır.
 
 ```powershell
 cd backend
@@ -379,8 +379,6 @@ cd backend
 ai-scribe/
 ├── backend/       FastAPI, tests/, sql/schema.sql, uploads/, .env.example
 ├── frontend/      Next.js
-├── docs/week1/    Erken tasarım notları; güncel sözleşme bu dosyadır
+├── docs/week1/    Tasarım notları
 └── README.md
 ```
-
-Sürüm kontrolüne girmez: `backend/.env`, `uploads/`, `downloads/`, `frontend/.next/`, sanal ortamlar.
